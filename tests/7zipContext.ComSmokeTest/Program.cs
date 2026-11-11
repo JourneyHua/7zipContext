@@ -126,7 +126,8 @@ internal static class Program
         Console.WriteLine($"7zipContext cli: {ctxCli}");
 
         // ---------- 造测试材料 ----------
-        var sevenZip = Path.Combine(dist, "tools", "7z.exe");
+        // 引擎由安装阶段解析到 %LOCALAPPDATA%，不再随仓库/发布目录携带
+        var sevenZip = ZipContext.Core.EngineLocator.Require("7z.exe");
         // workingDir 定为 stage：输入用相对名，包内路径才干净（输出用绝对路径）
         void Run7z(string workingDir, params string[] args)
         {

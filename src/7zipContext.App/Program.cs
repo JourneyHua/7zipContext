@@ -22,6 +22,11 @@ public static class Program
         var verb = args[0].ToLowerInvariant();
         var rest = args.Skip(1).ToArray();
 
+        // 引擎命令由 install.ps1 以隐藏窗口调用，绝不能弹 MessageBox（会挂住安装脚本）。
+        // 统一用「状态文件 + 退出码」回传；手动执行时加 --show 才弹窗。
+        if (verb is "--ensure-engine" or "--check-engine-update" or "--update-engine" or "--engine-info")
+            return RunEngineCommand(verb, rest);
+
         try
         {
             switch (verb)
@@ -87,6 +92,54 @@ public static class Program
 
     private static void ShowInfo(string message) =>
         MessageBox.Show(message, "7zipContext", MessageBoxButton.OK, MessageBoxImage.Information);
+
+    // ---------- 7-Zip 引擎：首次安装 / 更新检查 / 升级 ----------
+
+    private static int RunEngineCommand(string verb, string[] rest)
+    {
+        string? Value(string name)
+        {
+            for (var i = 0; i < rest.Length - 1; i++)
+                if (rest[i].Equals(name, StringComparison.OrdinalIgnoreCase)) return rest[i + 1];
+            return null;
+        }
+        var force = rest.Any(a => a is "--force" or "-Force");
+        var show = rest.Any(a => a is "--show" or "-Show");
+        var enginePath = Value("--engine-path") ?? Value("-EnginePath");
+        var engineSource = Value("--engine-source") ?? Value("-EngineSource");
+
+        EngineProvisioner.EnsureResult result;
+        try
+        {
+            result = verb switch
+            {
+                "--ensure-engine" => EngineProvisioner.Ensure(enginePath, engineSource, force),
+                "--check-engine-update" => EngineProvisioner.CheckUpdate(force),
+                "--update-engine" => EngineProvisioner.Update(engineSource),
+                _ => new EngineProvisioner.EnsureResult(true, EngineProvisioner.Describe(), null, "info"),
+            };
+        }
+        catch (Exception ex)
+        {
+            result = new EngineProvisioner.EnsureResult(false, ex.Message, null, "failed");
+        }
+
+        // 只有「准备 / 升级」写 last-ensure.json（install.ps1 读它判断引擎是否就绪）。
+        // 检查 / 查询命令写到独立文件，避免把安装状态覆盖成一条更新提示。
+        if (verb is "--ensure-engine" or "--update-engine")
+            EngineProvisioner.WriteStatus(result, EngineProvisioner.StatusPath);
+        else
+            EngineProvisioner.WriteStatus(result,
+                Path.Combine(ZipContext.Core.EngineLocator.ConfigRoot, "last-query.json"));
+
+        if (show)
+        {
+            Action<string> notify = result.Ok ? ShowInfo : ShowError;
+            notify(result.Message);
+        }
+        else Console.WriteLine(result.Message);   // 直接命令行运行时也能看到
+        return result.Ok ? 0 : 1;
+    }
 
     // ---------- 动词实现 ----------
 

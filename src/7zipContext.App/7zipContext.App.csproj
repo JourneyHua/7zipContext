@@ -19,10 +19,4 @@
     <ProjectReference Include="..\7zipContext.Core\7zipContext.Core.csproj" />
   </ItemGroup>
 
-  <!-- 发布时带上 7z 后端（exe + dll 必须成对） -->
-  <ItemGroup>
-    <None Include="..\..\tools\7z.exe" Link="tools\7z.exe" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\..\tools\7z.dll" Link="tools\7z.dll" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
-
 </Project>

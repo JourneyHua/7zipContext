@@ -29,31 +29,12 @@ public sealed class SevenZipService
 
     private bool GuiAvailable => UseGui && _sevenZipGuiPath is not null;
 
-    /// <summary>默认查找顺序：应用目录 tools/7z.exe → 应用目录 7z.exe → PATH。</summary>
-    private static string ResolveDefaultPath()
-    {
-        var baseDir = AppContext.BaseDirectory;
-        foreach (var candidate in new[]
-        {
-            Path.Combine(baseDir, "tools", "7z.exe"),
-            Path.Combine(baseDir, "7z.exe"),
-        })
-            if (File.Exists(candidate))
-                return candidate;
-
-        var onPath = FindOnPath("7z.exe");
-        return onPath ?? throw new FileNotFoundException("找不到 7z.exe，请将其放在应用目录 tools/ 下。");
-    }
-
-    private static string? FindOnPath(string name)
-    {
-        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
-        {
-            var p = Path.Combine(dir.Trim(), name);
-            if (File.Exists(p)) return p;
-        }
-        return null;
-    }
+    /// <summary>
+    /// 引擎由安装阶段写入 %LOCALAPPDATA%\7zipContext\engine.path 指针，
+    /// 这里只读指针 + 本机探测，**绝不联网**（菜单路径可能在 explorer 进程内）。
+    /// 显式传入 sevenZipPath 时仍优先（测试用）。
+    /// </summary>
+    private static string ResolveDefaultPath() => EngineLocator.Require("7z.exe");
 
     public sealed record RunResult(int ExitCode, string StdOut, string StdErr)
     {

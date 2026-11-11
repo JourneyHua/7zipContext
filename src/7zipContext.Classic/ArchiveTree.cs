@@ -179,20 +179,12 @@ internal static class ArchiveTree
         return names;
     }
 
-    private static string? SevenZipPath()
-    {
-        var asm = Assembly.GetExecutingAssembly().Location;
-        var dir = Path.GetDirectoryName(asm);
-        if (string.IsNullOrEmpty(dir)) return null;
-        var up = Directory.GetParent(dir)?.FullName;
-        foreach (var root in new[] { up, dir })
-        {
-            if (root is null) continue;
-            var p = Path.Combine(root, "tools", "7z.exe");
-            if (File.Exists(p)) return p;
-        }
-        return null;
-    }
+    /// <summary>
+    /// 只走 EngineLocator（读本地指针/本机探测，微秒级、零网络）。
+    /// 这里跑在 explorer.exe 进程内且有 250ms 硬超时，绝对不能联网或起下载。
+    /// 找不到引擎时返回 null，由调用方降级成一行提示文字。
+    /// </summary>
+    private static string? SevenZipPath() => ZipContext.Core.EngineLocator.Resolve("7z.exe");
 
     // ---------------- 建树 + 渲染 ----------------
 

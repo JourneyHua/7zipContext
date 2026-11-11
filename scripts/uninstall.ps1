@@ -4,6 +4,7 @@
 #
 # 参数：
 #   -Purge           顺带删除 dist\ 发布目录（默认保留）
+#   -PurgeEngine     顺带删除已下载的 7-Zip 引擎（默认保留；本机已有的引擎不会动）
 #   -RestartExplorer 完成后重启资源管理器
 #
 # 注册表清理在本脚本内独立完成（不依赖 dist\7zipContext.exe），
@@ -11,6 +12,7 @@
 
 param(
     [switch]$Purge,
+    [switch]$PurgeEngine,
     [switch]$RestartExplorer
 )
 
@@ -128,6 +130,32 @@ if ($Purge) {
     }
 }
 
+# 7-Zip 引擎默认保留（用户可能还在用；本机已有的引擎永远不动）。
+# 只有显式 -PurgeEngine 才清掉「我们自己下载解包」的版本目录与指针文件。
+if ($PurgeEngine) {
+    $engineRoot = Join-Path $env:LOCALAPPDATA '7zipContext'
+    $engineMeta = Join-Path $engineRoot 'engine.json'
+    $engineDirs = Join-Path $engineRoot 'engine'
+    $isDownloaded = $false
+    if (Test-Path -LiteralPath $engineMeta) {
+        try {
+            $meta = Get-Content -LiteralPath $engineMeta -Raw -Encoding UTF8 | ConvertFrom-Json
+            $isDownloaded = ($meta.origin -eq 'downloaded')
+        } catch { }
+    }
+    if ($isDownloaded -and (Test-Path -LiteralPath $engineDirs)) {
+        Remove-Item -LiteralPath $engineDirs -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($f in 'engine.path', 'engine.json', 'last-ensure.json',
+                      'last-update-check', 'last-update-result.json') {
+            $p = Join-Path $engineRoot $f
+            if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+        }
+        Say '  已删除下载的 7-Zip 引擎缓存' 'Green'
+    } else {
+        Say '  引擎为本机已有，未做任何删除（只清本工具下载的版本）' 'DarkGray'
+    }
+}
+
 $signature = @'
 [DllImport("shell32.dll")] public static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
 '@
@@ -143,4 +171,5 @@ if ($RestartExplorer) {
 
 Say ''
 Say "卸载完成。$(if ($Purge) { '' } else { '（dist\ 已保留；加 -Purge 可一并删除）'})" 'Green'
+if (-not $PurgeEngine) { Say '  （7-Zip 引擎已保留；加 -PurgeEngine 可删除本工具下载的引擎）' 'Gray' }
 exit $(if ($left -eq 0) { 0 } else { 1 })

@@ -51,8 +51,12 @@ public static class ShellIntegration
 
     // ---------- 默认打开方式：交给 7zFM.exe ----------
 
-    private static string SevenZipFileManager =>
-        System.IO.Path.Combine(AppContext.BaseDirectory, "tools", "7zFM.exe");
+    /// <summary>
+    /// 7zFM.exe 来自安装阶段解析出的引擎目录（本机已有或下载解包）。
+    /// 引擎缺失时返回 null，RegisterDefaults 会跳过注册而不是写一条死路径。
+    /// </summary>
+    private static string? SevenZipFileManager =>
+        ZipContext.Core.EngineLocator.Resolve("7zFM.exe");
 
     /// <summary>
     /// 把 .zip/.7z/.rar 注册到 7-Zip 文件管理器。
@@ -66,7 +70,7 @@ public static class ShellIntegration
     private static void RegisterDefaults()
     {
         var fm = SevenZipFileManager;
-        if (!System.IO.File.Exists(fm)) return;
+        if (fm is null) return;   // 引擎未就绪：不写死路径，等下次 install 再注册
 
         foreach (var ext in DefaultExtensions)
         {

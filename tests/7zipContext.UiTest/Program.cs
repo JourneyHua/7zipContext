@@ -162,19 +162,8 @@ internal static class Program
         return found;
     }
 
-    /// <summary>从可执行文件所在目录向上找 dist\tools\7z.exe（不写死本机路径）。</summary>
-    private static string FindSevenZip()
-    {
-        var dir = AppContext.BaseDirectory;
-        for (int i = 0; i < 6 && dir is not null; i++)
-        {
-            var candidate = Path.Combine(dir, "dist", "tools", "7z.exe");
-            if (File.Exists(candidate)) return candidate;
-            var direct = Path.Combine(dir, "tools", "7z.exe");
-            if (File.Exists(direct)) return direct;
-            dir = Path.GetDirectoryName(dir.TrimEnd(Path.DirectorySeparatorChar));
-        }
-        return "7z.exe"; // 退回 PATH
-    }
+    /// <summary>走统一的引擎解析器（本机已有 / 安装阶段下载），不写死任何路径。</summary>
+    private static string FindSevenZip() =>
+        ZipContext.Core.EngineLocator.Require("7z.exe");
 
 }

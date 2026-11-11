@@ -5,13 +5,20 @@
 # 参数：
 #   -SkipPublish     跳过 dotnet publish（只改了注册逻辑、重跑时装得快）
 #   -RestartExplorer 完成后自动重启资源管理器（菜单立即可见；不加则提示手动）
+#   -EnginePath      手动指定本机已有的 7-Zip 目录（离线用，需含 7z/7zG/7zFM/7z.dll）
+#   -EngineSource    自定义官方安装包下载 URL（GitHub 不可达时用）
+#   -SkipEngineCheck 跳过「检查更新」提示（不影响引擎准备）
 #
-# 步骤：发布 → 注册 Win11 新版右键菜单（AppX）→ 清理 v1 残留 → 注册经典菜单 handler → 安装自检
+# 步骤：发布 → 准备 7-Zip 引擎 → 注册 Win11 新版右键菜单（AppX）
+#       → 清理 v1 残留 → 注册经典菜单 handler → 安装自检
 # 卸载：powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 
 param(
     [switch]$SkipPublish,
-    [switch]$RestartExplorer
+    [switch]$RestartExplorer,
+    [string]$EnginePath,
+    [string]$EngineSource,
+    [switch]$SkipEngineCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +29,7 @@ $pkgName = '7zipContext.ContextMenu'
 $exe = Join-Path $dist '7zipContext.exe'
 
 function Say([string]$msg, [string]$color = 'Gray') { Write-Host $msg -ForegroundColor $color }
-function Step([int]$n, [string]$msg) { Write-Host "[$n/4] $msg" -ForegroundColor Cyan }
+function Step([int]$n, [string]$msg) { Write-Host "[$n/5] $msg" -ForegroundColor Cyan }
 
 # ---- 0. 杀掉可能锁住 dist 文件的进程（COM 服务器常驻，重装必撞） ----
 Get-Process -Name '7zipContext.Shell', '7zipContext' -ErrorAction SilentlyContinue | ForEach-Object {
@@ -47,14 +54,51 @@ if ($SkipPublish) {
 }
 
 $missing = @('7zipContext.exe', '7zipContext.Shell.comhost.dll',
-             '7zipContext.Classic.comhost.dll', 'tools\7z.exe', 'tools\7zG.exe', 'tools\7zFM.exe') |
+             '7zipContext.Classic.comhost.dll', 'LICENSE', 'THIRD-PARTY-NOTICES.md') |
     Where-Object { -not (Test-Path (Join-Path $dist $_)) }
 if ($missing.Count -gt 0) {
     throw "dist 产物不完整，缺少：$($missing -join ', ')。请去掉 -SkipPublish 重跑。"
 }
 
-# ---- 2. 注册 Win11 新版右键菜单（AppX loose 注册，dist 即包根） ----
-Step 2 '注册 Win11 新版右键菜单 ...'
+# ---- 2. 准备 7-Zip 引擎（本机已有则复用，否则联网下载并校验） ----
+# 关键：这一步必须在 --install（注册 7zFM 默认打开方式）之前，
+# 且只在安装阶段联网；菜单/预览路径永远只读本地指针，绝不发网络请求。
+Step 2 '准备 7-Zip 引擎 ...'
+$engineArgs = @('--ensure-engine')
+if ($EnginePath)   { $engineArgs += @('--engine-path', $EnginePath) }
+if ($EngineSource) { $engineArgs += @('--engine-source', $EngineSource) }
+
+$engineStatusPath = Join-Path $env:LOCALAPPDATA '7zipContext\last-ensure.json'
+if (Test-Path $engineStatusPath) { Remove-Item -LiteralPath $engineStatusPath -Force -ErrorAction SilentlyContinue }
+$engineProc = Start-Process -FilePath $exe -ArgumentList $engineArgs -Wait -PassThru -WindowStyle Hidden
+$engineResult = $null
+if (Test-Path $engineStatusPath) {
+    try { $engineResult = Get-Content -LiteralPath $engineStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+}
+$engineReady = ($engineProc.ExitCode -eq 0) -and ($engineResult -and $engineResult.ok)
+if ($engineReady) {
+    Say "  [OK] $($engineResult.message)" 'Green'
+} else {
+    $why = if ($engineResult -and $engineResult.message) { $engineResult.message } else { "exit=$($engineProc.ExitCode)，未产生状态文件" }
+    Say "  [X] 7-Zip 引擎未就绪：$why" 'Yellow'
+    Say '      菜单仍会注册，但压缩/解压不可用。可重跑：' 'Yellow'
+    Say '        install.ps1 -EnginePath <本机 7-Zip 目录>   或   -EngineSource <可达安装包 URL>' 'Yellow'
+}
+
+# 更新检查：只提示不升级，内部按「每天最多一次」节流；失败/离线绝不影响安装结果。
+if (-not $SkipEngineCheck -and $engineReady) {
+    Start-Process -FilePath $exe -ArgumentList @('--check-engine-update') -Wait -WindowStyle Hidden | Out-Null
+    $checkPath = Join-Path $env:LOCALAPPDATA '7zipContext\last-update-result.json'
+    if (Test-Path $checkPath) {
+        try {
+            $chk = Get-Content -LiteralPath $checkPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($chk.message) { Say "  [i] $($chk.message)" 'DarkGray' }
+        } catch { }
+    }
+}
+
+# ---- 3. 注册 Win11 新版右键菜单（AppX loose 注册，dist 即包根） ----
+Step 3 '注册 Win11 新版右键菜单 ...'
 Copy-Item (Join-Path $root 'package\AppxManifest.xml') (Join-Path $dist 'AppxManifest.xml') -Force
 # 图标资源：Square44x44Logo / Square150x150Logo / StoreLogo（父项图标就取 44x44 那张）
 Copy-Item (Join-Path $root 'package\*.png') $dist -Force
@@ -92,8 +136,8 @@ if (-not $menuRegistered) {
     Say '    （失败也可用「显示更多选项」里的经典菜单，功能等价）' 'Yellow'
 }
 
-# ---- 3. 清理 v1 残留（注册表动词 / 预览窗格 / 文件关联） ----
-Step 3 '清理 v1 残留注册（动词 / 预览窗格 / 文件关联）...'
+# ---- 4. 清理 v1 残留（注册表动词 / 预览窗格 / 文件关联） ----
+Step 4 '清理 v1 残留注册（动词 / 预览窗格 / 文件关联）...'
 
 # v2 只做右键菜单：不注册文件关联、不注册预览窗格，只把旧版残留清干净。
 # WinExe 进程 $LASTEXITCODE 为空（5.1 对 GUI 程序不写），必须 -PassThru 取退出码
@@ -112,8 +156,8 @@ Say '  注册经典菜单预览（7zipContext.Classic）...' 'DarkGray'
 if ($LASTEXITCODE -ne 0) { Say '  [X] 经典菜单 handler 注册失败。' 'Yellow' }
 else { Say '  [OK] 经典菜单 handler 已注册（4 个 shell 目标）' 'Green' }
 
-# ---- 4. 安装自检 ----
-Step 4 '安装自检 ...'
+# ---- 5. 安装自检 ----
+Step 5 '安装自检 ...'
 $ok = 0; $bad = 0
 function Check([string]$name, [bool]$pass, [string]$hint = '') {
     if ($pass) { $script:ok++; Say "  [OK] $name" 'Green' }
@@ -121,6 +165,21 @@ function Check([string]$name, [bool]$pass, [string]$hint = '') {
 }
 
 Check 'dist 产物完整' ($missing.Count -eq 0)
+
+# 7-Zip 引擎：四件套齐全（本机已有或安装阶段下载解包），且不位于 dist\ 内
+$enginePointer = Join-Path $env:LOCALAPPDATA '7zipContext\engine.path'
+$engineDir = ''
+if (Test-Path -LiteralPath $enginePointer) {
+    try { $engineDir = (Get-Content -LiteralPath $enginePointer -Raw -Encoding UTF8).Trim() } catch { }
+}
+$engineFiles = 0
+if ($engineDir) {
+    foreach ($f in '7z.exe', '7zG.exe', '7zFM.exe', '7z.dll') {
+        if (Test-Path -LiteralPath (Join-Path $engineDir $f)) { $engineFiles++ }
+    }
+}
+Check "7-Zip 引擎可用（四件套 $engineFiles/4）" ($engineReady -and $engineFiles -eq 4) `
+    '运行 install.ps1（不带 -SkipPublish）完成首次安装；离线用 -EnginePath 指定目录'
 
 $pkg = Get-AppxPackage -Name $pkgName
 Check "AppX 菜单包（$pkgName）" ($menuRegistered -and $pkg -and $pkg.Status -eq 'Ok') '重跑 install 或开启开发者模式'
@@ -138,7 +197,7 @@ foreach ($ext in '.zip', '.7z', '.rar') {
     $k = $hkcuAssoc.OpenSubKey("Software\Classes\7zipContext$ext\shell\open\command")
     if ($k -and $k.GetValue('') -like '*7zFM.exe*') { $fmOk++; $k.Close() }
 }
-Check "默认打开方式已注册（7zFM $fmOk/3）" ($fmOk -eq 3) 'yaya.exe --install 失败，或 tools\7zFM.exe 缺失'
+Check "默认打开方式已注册（7zFM $fmOk/3）" ($fmOk -eq 3) '--install 失败，或 7-Zip 引擎未就绪'
 
 # comhost 真实 COM 激活（Explorer 同款路径；进程内冒烟测试覆盖不到这里）
 $comhostOk = $true
@@ -189,7 +248,9 @@ if (Test-Path $probeExe) {
         Set-Content -Path (Join-Path $tmp 'src\probe.txt') -Value '7zipContext' -Encoding ascii
         Push-Location (Join-Path $tmp 'src')
         try {
-            & (Join-Path $dist 'tools\7z.exe') a -tzip (Join-Path $tmp 'probe.zip') 'probe.txt' -y -bso0 -bsp0 | Out-Null
+            # 引擎来自 %LOCALAPPDATA%，不在 dist\ 里
+            $probe7z = if ($engineDir) { Join-Path $engineDir '7z.exe' } else { '7z.exe' }
+            & $probe7z a -tzip (Join-Path $tmp 'probe.zip') 'probe.txt' -y -bso0 -bsp0 | Out-Null
         } finally { Pop-Location }
 
         $out = & $probeExe invoke-verb (Join-Path $tmp 'probe.zip') 'B9A10001-8C3F-4A2E-9E6D-5F1A2B3C4D01' 2>&1
@@ -227,6 +288,8 @@ if ($menuRegistered) {
 }
 Say '  - 经典右键：右键 → 显示更多选项 → 智能解压到此处 ...' 'Gray'
 Say '  - 经典菜单预览：右键压缩包 → 菜单下半部分直接铺开包内结构（规则改 dist\7zipContext.ini）' 'Gray'
+Say '  - 检查 7-Zip 引擎更新：dist\7zipContext.exe --check-engine-update --show' 'Gray'
+Say '  - 升级 7-Zip 引擎：dist\7zipContext.exe --update-engine --show' 'Gray'
 Say '  - 卸载：powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1' 'Gray'
 
 if ($RestartExplorer) {

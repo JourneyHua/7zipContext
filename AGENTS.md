@@ -12,14 +12,16 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -RestartExplorer
 powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 ```
 
-改了源码要去掉 `-SkipPublish`（会跑 `publish.ps1`）。安装完必须看到自检 **9/9 全绿**。
+改了源码要去掉 `-SkipPublish`（会跑 `publish.ps1`）。安装完必须看到自检 **10/10 全绿**。
 只改注册逻辑用 `-SkipPublish`；`publish.ps1` 会自己停/起 explorer。
+离线安装用 `-EnginePath <本机 7-Zip 目录>`；GitHub 不可达用 `-EngineSource <URL>`。
 
 ## 技术栈
 
-C# / .NET 8。引擎是打包的 `tools\7z.exe`（列表/测试，要 stdout）+ `tools\7zG.exe`
-（**压缩与解压**，自带进度窗和密码框）+ `tools\7zFM.exe`（默认打开方式，配 `Lang\zh-cn.txt`）
-+ `tools\7z.dll`（LGPL）。
+C# / .NET 8。**仓库不带 7-Zip 本体**：安装阶段由 `EngineProvisioner` 探测本机/联网下载，
+落到 `%LOCALAPPDATA%\7zipContext\engine\{版本}\`；运行时由 `EngineLocator` 只读
+`engine.path` 定位 `7z.exe`（列表/测试）+ `7zG.exe`（压缩解压，自带进度窗和密码框）
++ `7zFM.exe`（默认打开方式）+ `7z.dll`。
 菜单有两套：AppX 清单 + `IExplorerCommand`（Win11 现代菜单，7 个动词）、
 `IContextMenu` comhost（经典菜单，内联目录树）。
 
@@ -70,13 +72,32 @@ dist/            发布产物 + 已注册 AppX 包根（勿删）       .workbud
     → `CreateDIBSection` → 拷入。判断标志：日志里 `alphaPixels` 计数不能是 0。
 19. **仓库已公开**：不要在代码/文档/注释里写本机绝对路径（`C:\Users\...`、某台机器的安装目录）、
     内部代理地址或任何第三方压缩软件的产品名/内部文件名；测试工具一律用相对路径探测。
-    第三方组件的许可与商标声明集中在 `THIRD-PARTY-NOTICES.md`，改动随包二进制时同步更新。
+    第三方组件的来源、许可与商标声明集中在 `THIRD-PARTY-NOTICES.md`，改动引擎获取逻辑时同步更新。
+20. **仓库/发布产物都不带 7-Zip 二进制**：`git ls-files` 里不能出现 `7z*.exe` / `7z.dll` / `Lang\`；
+    三个 `.csproj` 不要再 `None Include ..\..\tools\...`。引擎由安装阶段单独获取。
+21. **菜单路径绝不能联网**：`EngineLocator`（Core）只允许读 `engine.path` + 本地探测，
+    零 `HttpClient`、零子进程。经典菜单 handler 在 explorer 进程内且有 250ms 硬超时，
+    一次 HTTP 就会卡死右键菜单。下载/解压/版本检查只放 `EngineProvisioner`（App，CLI 阶段）。
+22. **WinExe 没有控制台**：`--ensure-engine` 等引擎命令由 `install.ps1` 以 `-WindowStyle Hidden`
+    调用，**绝不能弹 MessageBox**（会挂住安装脚本）。结果写
+    `%LOCALAPPDATA%\7zipContext\last-ensure.json` + 退出码，脚本读文件展示。
+23. **别覆盖底层失败原因**：`DownloadLatest` 返回具体 reason，外层 `Ensure`/`Update`
+    必须原样透传。曾出现过外层用「未能下载」笼统提示覆盖掉 `SHA256 不匹配 / 超时 / 代理拒绝`，
+    导致完全无法排障。
+24. **引擎优先级链**：自身缓存 → PATH（含 scoop `.shim` 解引用）→ 注册表 → 常见路径 → 下载。
+    四件套（`7z.exe/7zG.exe/7zFM.exe/7z.dll`）齐全才算可用；本机已有时不联网。
+    已有指针且元数据路径一致时**不要重写 `engine.json`**，否则每次重装都会把
+    `origin=downloaded` 和 SHA256 抹成 `local`。
+25. **下载必须校验**：GitHub Release API 的 asset `digest` 做 SHA256；
+    自定义 `-EngineSource` 无 digest 时改验 Authenticode，都不通过就拒绝执行。
+    不内置任何第三方镜像。
 
 ## 当前状态
 
 v2 全部落地：经典菜单内联目录树（规则见 `dist\7zipContext.ini`）、压缩/解压走 `7zG.exe`、
 WPF 主窗口/设置页/预览弹窗/文件关联/`IPreviewHandler` 全部移除（`7zipContext.Preview` 工程已删）、
-AppX 的 Preview 动词已退役（现代菜单 7 个动词）、自检 9 项。
+AppX 的 Preview 动词已退役（现代菜单 7 个动词）、自检 10 项（含引擎可用性）。
+引擎改为运行时获取，仓库与 `dist\` 均不携带 7-Zip 二进制。
 
-基线：SmokeTest 19/19、ComSmokeTest 59/59、install 自检 9/9。
+基线：SmokeTest 19/19、ComSmokeTest 59/59、install 自检 10/10（新增「7-Zip 引擎可用」）。
 同名菜单项重复通常来自机器上另一款压缩软件，本项目的经典菜单动词已全部改为自插以避开冲突。

@@ -10,4 +10,8 @@
     <AssemblyName>7zipContext.UiTest</AssemblyName>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\7zipContext.Core\7zipContext.Core.csproj" />
+  </ItemGroup>
+
 </Project>

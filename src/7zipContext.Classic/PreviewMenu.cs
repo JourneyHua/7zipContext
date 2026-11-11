@@ -182,7 +182,8 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
     {
         TreeStatus.Timeout => "（读取超时，包太大）",
         TreeStatus.Empty => "（空压缩包）",
-        TreeStatus.Unsupported => "（不支持的格式）",
+        // 非 .zip 且引擎缺失时走这里（.zip 走 ZipArchive，不依赖引擎，天然可用）
+        TreeStatus.Unsupported => "（未找到 7-Zip 引擎，请运行 install.ps1）",
         _ => "（无法读取，可能已加密或损坏）",
     };
 
