@@ -129,7 +129,7 @@ AppX 的 Preview 动词已退役（现代菜单 8 个动词，含「用 7-Zip �
 引擎改为运行时获取，仓库与 `dist\` 均不携带 7-Zip 二进制。
 2026-11-11 追加轻量设置面板（`SettingsWindow.cs` / `AppSettings.cs`），由开始菜单图标打开；
 追加 `7zipContext.Setup` 图形化安装卸载工具与 `release\7zipContext-Setup.zip` 打包链；
-分卷后缀与「用 7-Zip 打开」改为 `[archive]` 配置（见红线 31），发布 v1.1.0。
+分卷后缀与「用 7-Zip 打开」改为 `[archive]` 配置（见红线 31），发布 v1.1.1。
 
 基线：SmokeTest 32/32、ComSmokeTest 75/75、install 自检 10/10（新增「7-Zip 引擎可用」）。
 同名菜单项重复通常来自机器上另一款压缩软件，本项目的经典菜单动词已全部改为自插以避开冲突。

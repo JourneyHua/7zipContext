@@ -11,7 +11,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <StartupObject>ZipContext.App.Program</StartupObject>
     <ApplicationIcon>..\..\assets\7zipContext.ico</ApplicationIcon>
-    <Version>1.1.0</Version>
+    <Version>1.1.1</Version>
     <Product>7zipContext</Product>
   </PropertyGroup>
 
