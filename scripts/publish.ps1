@@ -40,6 +40,7 @@ function Stop-DistLockers {
 }
 
 $killedExplorer = (Get-Process -Name explorer -ErrorAction SilentlyContinue) -ne $null
+try {
 Stop-DistLockers
 Start-Sleep -Milliseconds 1200
 
@@ -92,7 +93,12 @@ if ($missing.Count -gt 0) { throw "发布产物缺失：$($missing -join ', ')" 
 
 if (Test-Path $stage) { [System.IO.Directory]::Delete($stage, $true) }
 
-if ($killedExplorer -and -not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
-    Start-Process explorer.exe
-}
 Write-Host "发布完成 → $dist（$($expect.Count)/$($expect.Count) 产物齐全，含自包含运行时）" -ForegroundColor Green
+}
+finally {
+    # 即使编译、清空 dist 或复制产物中途失败，也必须恢复桌面和任务栏。
+    if ($killedExplorer -and -not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
+        try { Start-Process explorer.exe }
+        catch { Write-Warning "资源管理器自动恢复失败，请手动运行 explorer.exe：$($_.Exception.Message)" }
+    }
+}
