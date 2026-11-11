@@ -37,7 +37,7 @@
 
 ### 普通用户：图形化安装包
 
-1. 下载并**完整解压** `7zipContext-Setup.zip`，不要直接在压缩软件窗口里运行。
+1. 下载并**完整解压** [7zipContext-Setup.zip](https://github.com/JourneyHua/7zipContext/releases/latest)，不要直接在压缩软件窗口里运行。
 2. 双击 `7zipContext.Setup.exe`，点击 **「安装 / 修复」**。
 3. 等待安装与自检完成，再右键文件或文件夹即可使用。
 
