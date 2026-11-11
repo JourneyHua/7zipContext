@@ -1,0 +1,9 @@
+dist/
+bin/
+obj/
+*.user
+.vs/
+publish/
+*.msix
+*.pfx
+.workbuddy/

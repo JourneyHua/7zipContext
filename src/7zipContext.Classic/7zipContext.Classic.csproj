@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableComHosting>true</EnableComHosting>
+    <RootNamespace>ZipContext.Classic</RootNamespace>
+    <AssemblyName>7zipContext.Classic</AssemblyName>
+    <PlatformTarget>x64</PlatformTarget>
+    <!-- 经典菜单 handler 必须由 explorer.exe 进程内加载：
+         这是 comhost 的第二个宿主场景（第一个是 dllhost 承载 IExplorerCommand）。
+         框架依赖：COM hosting 不支持自包含（NETSDK1128）。 -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\7zipContext.Core\7zipContext.Core.csproj" />
+  </ItemGroup>
+
+</Project>

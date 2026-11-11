@@ -1,0 +1,89 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+         xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+         xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+         xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap uap10 com desktop4 desktop5 rescap">
+
+  <Identity Name="7zipContext.ContextMenu"
+            Publisher="CN=7zipContext"
+            Version="1.0.0.0" />
+
+  <Properties>
+    <DisplayName>7zipContext</DisplayName>
+    <PublisherDisplayName>7zipContext</PublisherDisplayName>
+    <Logo>logo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="zh-cn" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App"
+                 Executable="7zipContext.exe"
+                 uap10:TrustLevel="mediumIL"
+                 uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements DisplayName="7zipContext"
+                          Description="7-Zip 右键菜单工具"
+                          Square150x150Logo="Square150x150Logo.png"
+                          Square44x44Logo="Square44x44Logo.png"
+                          BackgroundColor="transparent" />
+      <Extensions>
+
+        <!-- COM 服务器：7 个 IExplorerCommand 动词（预览已迁到 7zipContext.Classic）。
+             SurrogateServer = 系统 dllhost.exe 承载托管 comhost.dll（PowerToys 同款架构）。
+             所有 CCW 交互发生在 dllhost 进程内，跨进程边界由系统原生 COM 处理。
+             （自有 exe 的 LocalServer 外进程方案：.NET 托管 CCW 跨进程派发失效，已弃用） -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="7zipContext Shell">
+              <com:Class Id="B9A10001-8C3F-4A2E-9E6D-5F1A2B3C4D01" Path="7zipContext.Shell.comhost.dll" ThreadingModel="STA" DisplayName="7zipContext 智能解压到此处" />
+              <com:Class Id="B9A10002-8C3F-4A2E-9E6D-5F1A2B3C4D02" Path="7zipContext.Shell.comhost.dll" ThreadingModel="STA" DisplayName="7zipContext 智能解压到此处并删除" />
+              <com:Class Id="B9A10003-8C3F-4A2E-9E6D-5F1A2B3C4D03" Path="7zipContext.Shell.comhost.dll" ThreadingModel="STA" DisplayName="7zipContext 解压到同名文件夹" />
+              <com:Class Id="B9A10004-8C3F-4A2E-9E6D-5F1A2B3C4D04" Path="7zipContext.Shell.comhost.dll" ThreadingModel="STA" DisplayName="7zipContext 解压到其他文件夹" />
+              <!-- B9A10005（压缩文件预览）已退役：预览改为 7zipContext.Classic 在经典菜单里内联渲染目录树 -->
+              <com:Class Id="B9A10006-8C3F-4A2E-9E6D-5F1A2B3C4D06" Path="7zipContext.Shell.comhost.dll" ThreadingModel="STA" DisplayName="7zipContext 添加到 zip" />
+              <com:Class Id="B9A10007-8C3F-4A2E-9E6D-5F1A2B3C4D07" Path="7zipContext.Shell.comhost.dll" ThreadingModel="STA" DisplayName="7zipContext 添加到 7z" />
+              <com:Class Id="B9A10008-8C3F-4A2E-9E6D-5F1A2B3C4D08" Path="7zipContext.Shell.comhost.dll" ThreadingModel="STA" DisplayName="7zipContext 快速压缩到 zip" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+
+        <!-- Win11 新版右键菜单绑定 -->
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <!-- 文件（含压缩包）：解压组 + 快速压缩（「添加到」由 7zipContext.Classic 在经典菜单插，避免两处重复） -->
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="SmartExtract"       Clsid="B9A10001-8C3F-4A2E-9E6D-5F1A2B3C4D01" />
+              <desktop5:Verb Id="SmartExtractDelete" Clsid="B9A10002-8C3F-4A2E-9E6D-5F1A2B3C4D02" />
+              <desktop5:Verb Id="ExtractToName"      Clsid="B9A10003-8C3F-4A2E-9E6D-5F1A2B3C4D03" />
+              <desktop5:Verb Id="ExtractToFolder"    Clsid="B9A10004-8C3F-4A2E-9E6D-5F1A2B3C4D04" />
+              <desktop5:Verb Id="QuickZip"           Clsid="B9A10008-8C3F-4A2E-9E6D-5F1A2B3C4D08" />
+            </desktop5:ItemType>
+            <!-- 文件夹：仅压缩组 -->
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="AddZip"   Clsid="B9A10006-8C3F-4A2E-9E6D-5F1A2B3C4D06" />
+              <desktop5:Verb Id="Add7z"    Clsid="B9A10007-8C3F-4A2E-9E6D-5F1A2B3C4D07" />
+              <desktop5:Verb Id="QuickZip" Clsid="B9A10008-8C3F-4A2E-9E6D-5F1A2B3C4D08" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+
+</Package>

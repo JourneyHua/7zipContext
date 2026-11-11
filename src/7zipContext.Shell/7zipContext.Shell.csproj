@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableComHosting>true</EnableComHosting>
+    <RootNamespace>ZipContext.Shell</RootNamespace>
+    <AssemblyName>7zipContext.Shell</AssemblyName>
+    <!-- COM hosting 不支持自包含；框架依赖发布（comhost 从系统 .NET Desktop 运行时引导） -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\7zipContext.Core\7zipContext.Core.csproj" />
+  </ItemGroup>
+
+</Project>
