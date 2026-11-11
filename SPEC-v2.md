@@ -70,11 +70,22 @@ GUI 外壳，不引入第二套安装逻辑。
 | G5 | 已安装目录保留一份图形化卸载工具 | 设置面板「关于 → 打开卸载工具」随时可用 |
 | G6 | 安装包仍不含 7-Zip 本体 | 供应链与仓库合规不变 |
 
+### 分卷与打开规则（2026-11-11 追加，已拍板）
+
+目标：以后遇到奇怪分卷名只改 ini，不改代码；同时给所有文件一个独立的 7-Zip 打开入口。
+
+| # | 决策 | 理由 |
+|---|---|---|
+| A1 | 分卷后缀走 `[archive] splitFirstSuffixes/splitLaterSuffixes`，默认 `.001/.z01` | 配置化，避免再次硬编码 |
+| A2 | 只有首卷显示解压；后续卷单独选中不显示 | 后续卷不是独立压缩包 |
+| A3 | 执行只保留首卷；「并删除」删同组全部分卷 | 多选 `.001+.002` 不重复解压、不留孤儿 |
+| A4 | 「用 7-Zip 打开」是独立动词，两套菜单都加，可用 `openWithSevenZip` 关闭 | 满足“所有文件走 7-Zip”，不污染智能解压规则 |
+
 ## 三、保留 / 删除
 
 保留：
 - `7zipContext.Core`——7z 封装、智能解压规则、回收站删除、**`EngineLocator`（只读引擎定位）**
-- `7zipContext.Shell`——现代菜单 comhost（7 个动词，Preview 已退役）
+- `7zipContext.Shell`——现代菜单 comhost（8 个动词，Preview 已退役，含「用 7-Zip 打开」）
 - `7zipContext.Classic`——托管 `IContextMenu` handler，负责「压缩文件预览 + 内联目录树」
 - `7zipContext.App`——CLI、`EngineProvisioner`（下载/校验/解包/更新）、
   `SettingsWindow.cs` + `AppSettings.cs`（设置面板）、`PasswordDialog.cs`（CLI 兜底）

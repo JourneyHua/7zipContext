@@ -126,5 +126,15 @@ rootMax=20
 childrenPerFolder=3
 showFilesInSubfolders=0
 maxDepth=1
+
+; 压缩包识别规则：遇到奇怪分卷名只改这里，不用改程序
+; splitFirstSuffixes   分卷首卷后缀，逗号分隔；例如 .001,.z01,.part1.rar
+; splitLaterSuffixes   分卷后续后缀，逗号分隔；例如 .002,.z02,.part2.rar
+; openWithSevenZip     是否对所有文件/文件夹显示「用 7-Zip 打开」（0/1）
+
+[archive]
+splitFirstSuffixes=.001,.z01
+splitLaterSuffixes=.002,.z02
+openWithSevenZip=1
 """;
 }

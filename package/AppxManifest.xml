@@ -53,6 +53,7 @@
               <com:Class Id="B9A10006-8C3F-4A2E-9E6D-5F1A2B3C4D06" Path="7zipContext.Shell.comhost.dll" ThreadingModel="STA" DisplayName="7zipContext 添加到 zip" />
               <com:Class Id="B9A10007-8C3F-4A2E-9E6D-5F1A2B3C4D07" Path="7zipContext.Shell.comhost.dll" ThreadingModel="STA" DisplayName="7zipContext 添加到 7z" />
               <com:Class Id="B9A10008-8C3F-4A2E-9E6D-5F1A2B3C4D08" Path="7zipContext.Shell.comhost.dll" ThreadingModel="STA" DisplayName="7zipContext 快速压缩到 zip" />
+              <com:Class Id="B9A10009-8C3F-4A2E-9E6D-5F1A2B3C4D09" Path="7zipContext.Shell.comhost.dll" ThreadingModel="STA" DisplayName="7zipContext 用 7-Zip 打开" />
             </com:SurrogateServer>
           </com:ComServer>
         </com:Extension>
@@ -67,12 +68,14 @@
               <desktop5:Verb Id="ExtractToName"      Clsid="B9A10003-8C3F-4A2E-9E6D-5F1A2B3C4D03" />
               <desktop5:Verb Id="ExtractToFolder"    Clsid="B9A10004-8C3F-4A2E-9E6D-5F1A2B3C4D04" />
               <desktop5:Verb Id="QuickZip"           Clsid="B9A10008-8C3F-4A2E-9E6D-5F1A2B3C4D08" />
+              <desktop5:Verb Id="OpenWithSevenZip"   Clsid="B9A10009-8C3F-4A2E-9E6D-5F1A2B3C4D09" />
             </desktop5:ItemType>
-            <!-- 文件夹：仅压缩组 -->
+            <!-- 文件夹：压缩组 + 用 7-Zip 打开 -->
             <desktop5:ItemType Type="Directory">
               <desktop5:Verb Id="AddZip"   Clsid="B9A10006-8C3F-4A2E-9E6D-5F1A2B3C4D06" />
               <desktop5:Verb Id="Add7z"    Clsid="B9A10007-8C3F-4A2E-9E6D-5F1A2B3C4D07" />
               <desktop5:Verb Id="QuickZip" Clsid="B9A10008-8C3F-4A2E-9E6D-5F1A2B3C4D08" />
+              <desktop5:Verb Id="OpenWithSevenZip" Clsid="B9A10009-8C3F-4A2E-9E6D-5F1A2B3C4D09" />
             </desktop5:ItemType>
           </desktop4:FileExplorerContextMenus>
         </desktop4:Extension>

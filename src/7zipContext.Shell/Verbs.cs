@@ -75,6 +75,22 @@ public sealed class QuickZipCommand : ExplorerCommandBase
     protected override bool IsVisible(IReadOnlyList<string> paths) => paths.Count > 0;
 }
 
+/// <summary>
+/// 独立的「用 7-Zip 打开」入口：所有文件/文件夹都可点，交给 7zFM.exe。
+/// 不影响智能解压识别规则；可在 ini 里整体关闭。
+/// </summary>
+[ComVisible(true)]
+[Guid(VerbClsids.OpenWithSevenZip)]
+public sealed class OpenWithSevenZipCommand : ExplorerCommandBase
+{
+    protected override string Title => "用 7-Zip 打开(O)";
+    protected override string Verb => "--open-with-7zip";
+    protected override Guid CanonicalGuid => new(VerbClsids.OpenWithSevenZip);
+    protected override bool VisibleWhenEmpty => ZipContext.Core.ArchiveRules.Current.OpenWithSevenZip;
+    protected override bool IsVisible(IReadOnlyList<string> paths) =>
+        ZipContext.Core.ArchiveRules.Current.OpenWithSevenZip && paths.Count > 0;
+}
+
 /// <summary>动词可见性辅助。分卷规则统一由 Core 提供。</summary>
 internal static class ArchiveFormatsCompat
 {
@@ -102,6 +118,7 @@ public static class VerbClsids
     public const string AddZip = "B9A10006-8C3F-4A2E-9E6D-5F1A2B3C4D06";
     public const string Add7z = "B9A10007-8C3F-4A2E-9E6D-5F1A2B3C4D07";
     public const string QuickZip = "B9A10008-8C3F-4A2E-9E6D-5F1A2B3C4D08";
+    public const string OpenWithSevenZip = "B9A10009-8C3F-4A2E-9E6D-5F1A2B3C4D09";
 
     public static readonly IReadOnlyDictionary<string, Type> Map = new Dictionary<string, Type>
     {
@@ -112,5 +129,6 @@ public static class VerbClsids
         [AddZip] = typeof(AddZipCommand),
         [Add7z] = typeof(Add7zCommand),
         [QuickZip] = typeof(QuickZipCommand),
+        [OpenWithSevenZip] = typeof(OpenWithSevenZipCommand),
     };
 }

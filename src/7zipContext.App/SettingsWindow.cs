@@ -24,6 +24,11 @@ public sealed class SettingsWindow : Window
     private readonly CheckBox _showFiles = new() { Content = "子层也显示文件" };
     private readonly ComboBox _maxDepth = new() { Width = 90 };
 
+    // 压缩包识别规则
+    private readonly TextBox _splitFirst = new() { Width = 220 };
+    private readonly TextBox _splitLater = new() { Width = 220 };
+    private readonly CheckBox _openWith7Zip = new() { Content = "对所有文件/文件夹显示「用 7-Zip 打开」" };
+
     // 引擎
     private readonly TextBox _engineInfo = new()
     {
@@ -83,6 +88,7 @@ public sealed class SettingsWindow : Window
 
         var tabs = new TabControl();
         tabs.Items.Add(new TabItem { Header = "预览规则", Content = BuildPreviewTab() });
+        tabs.Items.Add(new TabItem { Header = "分卷与打开", Content = BuildArchiveTab() });
         tabs.Items.Add(new TabItem { Header = "7-Zip 引擎", Content = BuildEngineTab() });
         tabs.Items.Add(new TabItem { Header = "默认打开方式", Content = BuildAssocTab() });
         tabs.Items.Add(new TabItem { Header = "关于", Content = BuildAboutTab() });
@@ -90,8 +96,47 @@ public sealed class SettingsWindow : Window
 
         Content = dock;
         LoadPreview();
+        LoadArchive();
         RefreshEngine();
         RefreshAssoc();
+    }
+
+    // ------------------------------------------------------------ 分卷与打开
+
+    private UIElement BuildArchiveTab()
+    {
+        var panel = Stack();
+        panel.Children.Add(Tip("遇到奇怪分卷名时，只改这里的后缀列表即可，不用改程序。保存后下一次右键生效。"));
+
+        panel.Children.Add(Group("分卷后缀",
+            Row(Label("首卷后缀", 90), _splitFirst, Tip("逗号分隔；例如 .001,.z01,.part1.rar")),
+            Row(Label("后续后缀", 90), _splitLater, Tip("逗号分隔；例如 .002,.z02,.part2.rar")),
+            Tip("只有首卷会显示解压；后续卷单独选中不会显示。首卷后缀带序号时，删除源文件会自动找同组后续卷。")));
+
+        panel.Children.Add(Group("7-Zip 打开", _openWith7Zip,
+            Tip("开启后，两套右键菜单都会多出独立的「用 7-Zip 打开」项；它只负责打开，不改变智能解压的识别规则。")));
+
+        var buttons = Row();
+        var save = new Button { Content = "保存", Width = 90, IsDefault = true };
+        save.Click += (_, _) => SaveAll();
+        var reset = new Button { Content = "恢复默认", Width = 90 };
+        reset.Click += (_, _) => { LoadArchive(resetToDefault: true); SaveAll(); };
+        buttons.Children.Add(save);
+        buttons.Children.Add(reset);
+        panel.Children.Add(buttons);
+        return Wrap(panel);
+    }
+
+    private void LoadArchive(bool resetToDefault = false)
+    {
+        var s = resetToDefault ? new AppSettings() : AppSettings.Load();
+        _splitFirst.Text = string.IsNullOrWhiteSpace(s.SplitFirstSuffixes)
+            ? ZipContext.Core.ArchiveRules.DefaultSplitFirstSuffixes
+            : s.SplitFirstSuffixes;
+        _splitLater.Text = string.IsNullOrWhiteSpace(s.SplitLaterSuffixes)
+            ? ZipContext.Core.ArchiveRules.DefaultSplitLaterSuffixes
+            : s.SplitLaterSuffixes;
+        _openWith7Zip.IsChecked = s.OpenWithSevenZip;
     }
 
     // ------------------------------------------------------------ 预览规则
@@ -109,9 +154,9 @@ public sealed class SettingsWindow : Window
 
         var buttons = Row();
         var save = new Button { Content = "保存", Width = 90, IsDefault = true };
-        save.Click += (_, _) => SavePreview();
+        save.Click += (_, _) => SaveAll();
         var reset = new Button { Content = "恢复默认", Width = 90 };
-        reset.Click += (_, _) => { LoadPreview(resetToDefault: true); SavePreview(); };
+        reset.Click += (_, _) => { LoadPreview(resetToDefault: true); SaveAll(); };
         var openIni = new Button { Content = "打开 ini 文件", Width = 110 };
         openIni.Click += (_, _) =>
         {
@@ -143,7 +188,7 @@ public sealed class SettingsWindow : Window
         _maxDepth.SelectedItem = s.MaxDepth;
     }
 
-    private void SavePreview()
+    private void SaveAll()
     {
         try
         {
@@ -151,13 +196,21 @@ public sealed class SettingsWindow : Window
                 throw new ArgumentException("「最多显示项数」必须是 0 或正整数");
             if (!int.TryParse(_childrenPerFolder.Text.Trim(), out var children) || children < 0)
                 throw new ArgumentException("「每个子文件夹展开」必须是 0 或正整数");
-            var settings = new AppSettings
-            {
-                RootMax = root,
-                ChildrenPerFolder = children,
-                ShowFilesInSubfolders = _showFiles.IsChecked == true,
-                MaxDepth = _maxDepth.SelectedItem is int d ? d : 1,
-            };
+
+            var first = NormalizeSuffixes(_splitFirst.Text);
+            var later = NormalizeSuffixes(_splitLater.Text);
+            if (first.Count == 0)
+                throw new ArgumentException("「首卷后缀」不能为空；至少保留 .001");
+
+            // 从磁盘现有值出发，避免只保存一个页签时把另一个页签重置掉
+            var settings = AppSettings.Load();
+            settings.RootMax = root;
+            settings.ChildrenPerFolder = children;
+            settings.ShowFilesInSubfolders = _showFiles.IsChecked == true;
+            settings.MaxDepth = _maxDepth.SelectedItem is int d ? d : 1;
+            settings.SplitFirstSuffixes = string.Join(",", first);
+            settings.SplitLaterSuffixes = string.Join(",", later);
+            settings.OpenWithSevenZip = _openWith7Zip.IsChecked == true;
             settings.Save();
             SetStatus("已保存，下一次右键生效。");
         }
@@ -165,6 +218,20 @@ public sealed class SettingsWindow : Window
         {
             SetStatus($"保存失败：{ex.Message}", error: true);
         }
+    }
+
+    private static List<string> NormalizeSuffixes(string raw)
+    {
+        var result = new List<string>();
+        foreach (var part in raw.Split(new[] { ',', ';', ' ', '\t', '\r', '\n' },
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            var suffix = part.Trim();
+            if (suffix.Length == 0) continue;
+            if (!suffix.StartsWith('.')) suffix = "." + suffix;
+            if (!result.Contains(suffix, StringComparer.OrdinalIgnoreCase)) result.Add(suffix);
+        }
+        return result;
     }
 
     // ------------------------------------------------------------ 7-Zip 引擎

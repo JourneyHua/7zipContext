@@ -167,6 +167,7 @@ internal static class Program
             ("AddZip",             true,  true,  true,  null),
             ("Add7z",              true,  true,  true,  null),
             ("QuickZip",           true,  true,  true,  null),
+            ("OpenWithSevenZip",  true,  true,  true,  "7-Zip"),
         };
 
         Console.WriteLine("\n[1] 动词实例化（7 个 IExplorerCommand 类）");

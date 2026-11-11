@@ -51,6 +51,9 @@ public static class Program
                 case "--quick-zip":
                     RunCompress("zip", rest, openFolderAfter: true);
                     break;
+                case "--open-with-7zip":
+                    RunOpenWithSevenZip(rest);
+                    break;
                 case "--test":
                     if (rest.Length > 0) RunTest(rest[0]);
                     break;
@@ -289,6 +292,38 @@ public static class Program
         {
             var candidate = Path.Combine(dir, $"{name} ({i}){ext}");
             if (!File.Exists(candidate)) return candidate;
+        }
+    }
+
+    private static void RunOpenWithSevenZip(string[] paths)
+    {
+        var files = paths
+            .Where(p => !string.IsNullOrWhiteSpace(p) && (File.Exists(p) || Directory.Exists(p)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (files.Length == 0) return;
+
+        var fm = EngineLocator.Resolve("7zFM.exe");
+        if (fm is null)
+        {
+            ShowError("未找到 7zFM.exe。请先运行安装器准备 7-Zip 引擎，或在设置里关闭「用 7-Zip 打开」。");
+            return;
+        }
+
+        // 7zFM 是 GUI：用 ShellExecute + 引号参数路径；失败原因必须透传。
+        var args = string.Join(" ", files.Select(p => "\"" + p + "\""));
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = fm,
+                Arguments = args,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            ShowError($"打开失败：{ex.Message}");
         }
     }
 

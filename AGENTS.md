@@ -116,9 +116,10 @@ dist/            发布产物 + 已注册 AppX 包根（勿删）       .workbud
     复制到 `%LOCALAPPDATA%\7zipContext\app\`，再隐藏调用 `install.ps1 -SkipPublish`；
     不要另写一套注册逻辑。卸载同理复用 `uninstall.ps1`，本机已有 7-Zip 永远不删。
     ZIP 由 `scripts\package.ps1` 生成，仍不得携带 7-Zip 本体。
-31. **分卷只认 `.001` 首卷**：识别/去重/命名/删除统一走 `Core.ArchiveSelection` 与
-    `ArchiveFormats.SplitVolumeFiles`；Shell、Classic、App 都不得自己维护第二套分卷规则。
-    `.002` 等后续卷不是独立压缩包，删除源文件时删同组全部分卷。
+31. **分卷名和 7-Zip 打开都可配置**：分卷后缀来自 `[archive] splitFirstSuffixes/splitLaterSuffixes`，
+    识别/去重/命名/删除统一走 `Core.ArchiveRules` 与 `SplitVolumeNames`，不要再写死 `.001`。
+    「用 7-Zip 打开」是独立动词（CLSID `B9A10009`），受 `openWithSevenZip` 控制；
+    空选中查询要用 `VisibleWhenEmpty` 决定显隐，否则全局开关关闭时仍会闪一下。
 
 ## 当前状态
 

@@ -106,6 +106,13 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
                 _commands.Add(verb);
             }
 
+            // 独立「用 7-Zip 打开」：所有文件/文件夹都可点，可在 ini 里关闭
+            if (ZipContext.Core.ArchiveRules.Current.OpenWithSevenZip)
+            {
+                AddItem(hMenu, ref pos, NativeMethods.MF_STRING, "用 7-Zip 打开(O)", icon, (UIntPtr)id++);
+                _commands.Add("--open-with-7zip");
+            }
+
             if (_archive is null) return _commands.Count;
 
             var sw = System.Diagnostics.Stopwatch.StartNew();

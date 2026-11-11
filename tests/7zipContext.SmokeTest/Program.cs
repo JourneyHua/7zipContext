@@ -183,6 +183,28 @@ Console.WriteLine("\n[7] 分卷文件识别与菜单去重");
             string.Equals(p, later, StringComparison.OrdinalIgnoreCase)));
 }
 
+Console.WriteLine("\n[8] 分卷规则可配置");
+{
+    Check("默认首卷后缀含 .001/.z01",
+        ArchiveRules.Current.SplitFirstSuffixes.Contains(".001") &&
+        ArchiveRules.Current.SplitFirstSuffixes.Contains(".z01"));
+    Check("默认开启「用 7-Zip 打开」", ArchiveRules.Current.OpenWithSevenZip);
+    Check(".z01 识别为首卷", ArchiveFormats.IsFirstSplitVolume("weird.z01"));
+
+    var first = Path.Combine(work, "weird.part1.rar");
+    var later = Path.Combine(work, "weird.part2.rar");
+    await File.WriteAllTextAsync(first, "first");
+    await File.WriteAllTextAsync(later, "later");
+
+    var firstSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".part1.rar" };
+    var laterSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".part2.rar" };
+    var group = SplitVolumeNames.GroupFiles(first, firstSet, laterSet);
+    Check("自定义分卷后缀可找同组", group.Count == 2 &&
+        group.Any(p => string.Equals(p, later, StringComparison.OrdinalIgnoreCase)));
+    Check("自定义分卷命名去掉分卷后缀",
+        SplitVolumeNames.StripSplitSuffix(first, firstSet).EndsWith("weird", StringComparison.OrdinalIgnoreCase));
+}
+
 Console.WriteLine($"\n========== 结果: {passed} 通过 / {failed} 失败 ==========");
 Directory.Delete(work, true);
 return failed == 0 ? 0 : 1;

@@ -23,6 +23,9 @@ public class ExplorerCommandBase : ComInterop.IExplorerCommand
     /// <summary>可见性判定：传入选中路径，返回是否显示。</summary>
     protected virtual bool IsVisible(IReadOnlyList<string> paths) => true;
 
+    /// <summary>空选中项快速查询时是否仍返回启用。全局开关关闭的动词（如用 7-Zip 打开）应设为 false。</summary>
+    protected virtual bool VisibleWhenEmpty => true;
+
     public int GetTitle(ComInterop.IShellItemArray? psiItemArray, out IntPtr ppszName)
     {
         var title = Title;
@@ -91,7 +94,11 @@ public class ExplorerCommandBase : ComInterop.IExplorerCommand
         var paths = ComInterop.GetPaths(psiItemArray);
         if (paths.Count == 0)
         {
-            pCmdState = ComInterop.ECS_ENABLED;
+            // Win11 新版右键菜单构建初期会以「空选中项」快速查询一次。
+            // 根因修复：此时普通动词必须乐观返回 ECS_ENABLED —— 返回 ECS_HIDDEN 会被永久丢弃，
+            // 这正是新版菜单完全不显示 7zipContext 的原因（「显示更多 options」走的是完整查询所以能看到）。
+            // 但被 ini 全局关闭的动词（如「用 7-Zip 打开」）在空查询时就该隐藏。
+            pCmdState = VisibleWhenEmpty ? ComInterop.ECS_ENABLED : ComInterop.ECS_HIDDEN;
             return ComInterop.S_OK;
         }
         // 有真实选中项时按规则显隐（压缩包→解压项；任意文件/文件夹→压缩项）

@@ -17,6 +17,11 @@ public sealed class AppSettings
     public bool ShowFilesInSubfolders { get; set; }
     public int MaxDepth { get; set; } = 1;
 
+    // [archive] 段：分卷名规则 + 是否对所有文件显示「用 7-Zip 打开」
+    public string SplitFirstSuffixes { get; set; } = ZipContext.Core.ArchiveRules.DefaultSplitFirstSuffixes;
+    public string SplitLaterSuffixes { get; set; } = ZipContext.Core.ArchiveRules.DefaultSplitLaterSuffixes;
+    public bool OpenWithSevenZip { get; set; } = true;
+
     public static string IniPath => Path.Combine(
         Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? AppContext.BaseDirectory,
         "7zipContext.ini");
@@ -35,6 +40,16 @@ public sealed class AppSettings
         childrenPerFolder=3
         showFilesInSubfolders=0
         maxDepth=1
+
+        ; 压缩包识别规则：遇到奇怪分卷名只改这里，不用改程序
+        ; splitFirstSuffixes   分卷首卷后缀，逗号分隔；例如 .001,.z01,.part1.rar
+        ; splitLaterSuffixes   分卷后续后缀，逗号分隔；例如 .002,.z02,.part2.rar
+        ; openWithSevenZip     是否对所有文件/文件夹显示「用 7-Zip 打开」（0/1）
+
+        [archive]
+        splitFirstSuffixes=.001,.z01
+        splitLaterSuffixes=.002,.z02
+        openWithSevenZip=1
         """;
 
     public static AppSettings Load()
@@ -49,17 +64,36 @@ public sealed class AppSettings
                 var line = raw.Trim();
                 if (line.Length == 0 || line.StartsWith(';') || line.StartsWith('#')) continue;
                 if (line.StartsWith('[') && line.EndsWith(']')) { section = line[1..^1].Trim(); continue; }
-                if (!section.Equals("preview", StringComparison.OrdinalIgnoreCase)) continue;
                 var eq = line.IndexOf('=');
                 if (eq <= 0) continue;
                 var key = line[..eq].Trim().ToLowerInvariant();
                 var val = line[(eq + 1)..].Trim();
-                switch (key)
+                if (section.Equals("preview", StringComparison.OrdinalIgnoreCase))
                 {
-                    case "rootmax": if (int.TryParse(val, out var r) && r >= 0) s.RootMax = r; break;
-                    case "childrenperfolder": if (int.TryParse(val, out var c) && c >= 0) s.ChildrenPerFolder = c; break;
-                    case "showfilesinsubfolders": s.ShowFilesInSubfolders = val is "1" || val.Equals("true", StringComparison.OrdinalIgnoreCase); break;
-                    case "maxdepth": if (int.TryParse(val, out var d) && d >= 0 && d <= 2) s.MaxDepth = d; break;
+                    switch (key)
+                    {
+                        case "rootmax": if (int.TryParse(val, out var r) && r >= 0) s.RootMax = r; break;
+                        case "childrenperfolder": if (int.TryParse(val, out var c) && c >= 0) s.ChildrenPerFolder = c; break;
+                        case "showfilesinsubfolders": s.ShowFilesInSubfolders = val is "1" || val.Equals("true", StringComparison.OrdinalIgnoreCase); break;
+                        case "maxdepth": if (int.TryParse(val, out var d) && d >= 0 && d <= 2) s.MaxDepth = d; break;
+                    }
+                }
+                else if (section.Equals("archive", StringComparison.OrdinalIgnoreCase))
+                {
+                    switch (key)
+                    {
+                        case "splitfirstsuffixes":
+                        case "splitfirst":
+                            if (!string.IsNullOrWhiteSpace(val)) s.SplitFirstSuffixes = val;
+                            break;
+                        case "splitlatersuffixes":
+                        case "splitlater":
+                            if (!string.IsNullOrWhiteSpace(val)) s.SplitLaterSuffixes = val;
+                            break;
+                        case "openwithsevenzip":
+                            s.OpenWithSevenZip = val is "1" or "true" or "yes" or "on";
+                            break;
+                    }
                 }
             }
         }
@@ -87,6 +121,9 @@ public sealed class AppSettings
                 "childrenperfolder" => $"childrenPerFolder={ChildrenPerFolder}",
                 "showfilesinsubfolders" => $"showFilesInSubfolders={(ShowFilesInSubfolders ? 1 : 0)}",
                 "maxdepth" => $"maxDepth={MaxDepth}",
+                "splitfirstsuffixes" => $"splitFirstSuffixes={SplitFirstSuffixes}",
+                "splitlatersuffixes" => $"splitLaterSuffixes={SplitLaterSuffixes}",
+                "openwithsevenzip" => $"openWithSevenZip={(OpenWithSevenZip ? 1 : 0)}",
                 _ => line,
             });
         }

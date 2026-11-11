@@ -72,6 +72,7 @@ internal static class Program
         ("AddZip",             "B9A10006-8C3F-4A2E-9E6D-5F1A2B3C4D06"),
         ("Add7z",              "B9A10007-8C3F-4A2E-9E6D-5F1A2B3C4D07"),
         ("QuickZip",           "B9A10008-8C3F-4A2E-9E6D-5F1A2B3C4D08"),
+        ("OpenWithSevenZip",   "B9A10009-8C3F-4A2E-9E6D-5F1A2B3C4D09"),
     };
 
     private static void InvokeVerb(string zipPath, string clsidStr)
