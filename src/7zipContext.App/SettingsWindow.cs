@@ -262,9 +262,12 @@ public sealed class SettingsWindow : Window
             Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? "", "THIRD-PARTY-NOTICES.md"))));
         panel.Children.Add(buttons);
 
+        var uninstallButtons = Row();
+        uninstallButtons.Children.Add(MakeButton("打开卸载工具", _ => OpenUninstaller()));
         panel.Children.Add(Group("卸载",
-            Tip("powershell -ExecutionPolicy Bypass -File scripts\\uninstall.ps1"),
-            Tip("默认保留 dist\\ 与已下载的引擎；加 -Purge 删除 dist\\，加 -PurgeEngine 删除本工具下载的引擎。")));
+            uninstallButtons,
+            Tip("图形化工具会清理两套右键菜单和文件关联，可选择是否删除程序文件与本工具下载的 7-Zip 引擎。"),
+            Tip("本机原先安装的 7-Zip 永远不会被删除。高级用户也可运行 scripts\\uninstall.ps1。")));
         return Wrap(panel);
     }
 
@@ -400,6 +403,24 @@ public sealed class SettingsWindow : Window
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         internal static extern bool DestroyIcon(IntPtr hIcon);
+    }
+
+    private static void OpenUninstaller()
+    {
+        var dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? "";
+        foreach (var candidate in new[]
+                 {
+                     Path.Combine(dir, "..", "7zipContext.Setup.exe"),
+                     Path.Combine(dir, "7zipContext.Setup.exe"),
+                 })
+        {
+            if (!File.Exists(candidate)) continue;
+            try { Process.Start(new ProcessStartInfo(Path.GetFullPath(candidate)) { UseShellExecute = true }); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "7zipContext", MessageBoxButton.OK, MessageBoxImage.Warning); }
+            return;
+        }
+        MessageBox.Show("未找到图形化卸载工具。可重新下载安装包，或运行 scripts\\uninstall.ps1。",
+            "7zipContext", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     /// <summary>只打开脚本供查看，绝不静默执行 PowerShell（会弹 UAC/改注册，不该由设置面板代劳）。</summary>

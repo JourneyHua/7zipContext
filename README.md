@@ -35,12 +35,27 @@
 
 ## 安装
 
+### 普通用户：图形化安装包
+
+1. 下载并**完整解压** `7zipContext-Setup.zip`，不要直接在压缩软件窗口里运行。
+2. 双击 `7zipContext.Setup.exe`，点击 **「安装 / 修复」**。
+3. 等待安装与自检完成，再右键文件或文件夹即可使用。
+
+程序安装到 `%LOCALAPPDATA%\7zipContext\app\`，不需要管理员权限；安装完成后可以删除
+下载的 ZIP 和解压目录。已安装目录里也保留了一份图形化安装卸载工具。
+若本机没有完整的 7-Zip，安装器会自动从官方发布页下载、校验并解包。
+安装期间资源管理器会短暂重启，这是正常现象。
+
+需要 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)（自检会提示）。
+
+### 高级用户：从源码安装
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -RestartExplorer
 ```
 
-需要 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)（自检会提示）。
 脚本依次完成：发布 → **准备 7-Zip 引擎** → 注册两套菜单 → 清理旧版本残留 → **自检 10 项**。
+生成图形化安装包则运行 `scripts\package.ps1`，产物为 `release\7zipContext-Setup.zip`。
 
 可选参数：
 
@@ -95,6 +110,12 @@ dist\7zipContext.exe --update-engine --show         # 显式升级；旧版本�
 
 ## 卸载
 
+打开开始菜单里的 **7zipContext → 关于 → 打开卸载工具**，或运行安装目录里的
+`7zipContext.Setup.exe`，点击 **「卸载」**。可选择是否删除程序文件，以及是否删除
+**本工具下载**的 7-Zip 引擎；本机原先安装的 7-Zip 永远不会被删除。
+
+高级用户仍可运行：
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 ```
@@ -137,6 +158,7 @@ maxDepth=1              ; 展开层数 0/1/2
 - **7zipContext.App** — CLI 执行体 + **设置面板**（无参启动），菜单唯一入口；**引擎获取与更新检查**
 - **7zipContext.Shell** — Win11 `IExplorerCommand` 动词的 comhost 类库（7 个），由 dllhost 承载
 - **7zipContext.Classic** — 经典菜单 `IContextMenu` handler，**跑在 explorer.exe 进程内**，负责内联目录树
+- **7zipContext.Setup** — 图形化安装/卸载工具；安装到用户目录，复用同一套注册脚本与自检
 
 v1 的 WPF 主窗口、预览弹窗、文件关联、`IPreviewHandler` 预览窗格**已全部移除**；
 设置能力以轻量设置面板的形式保留（不再是 v1 那个主窗口）。
@@ -145,8 +167,9 @@ v1 的 WPF 主窗口、预览弹窗、文件关联、`IPreviewHandler` 预览窗
 ```
 src/7zipContext.Core     逻辑与后端        src/7zipContext.Shell    现代菜单动词 comhost
 src/7zipContext.App      CLI（7zipContext.exe）   src/7zipContext.Classic  经典菜单 handler
+src/7zipContext.Setup    图形化安装卸载工具
 package/          AppX 清单 + logo
-scripts/          install / uninstall / publish / 7zipContext-menu
+scripts/          install / uninstall / publish / package / 7zipContext-menu
 tests/            SmokeTest（Core 19）/ ComSmokeTest（动词 59）/ ComProbe / UiTest
 assets/           7zipContext.ico、7zipContext.png
 dist/             发布产物（也是已注册 AppX 包根，勿删）

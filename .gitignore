@@ -4,6 +4,8 @@ obj/
 *.user
 .vs/
 publish/
+release/
+dist-stage/
 *.msix
 *.pfx
 .workbuddy/

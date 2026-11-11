@@ -11,6 +11,7 @@
 dotnet build 7zipContext.sln -c Release
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -RestartExplorer
 powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
+powershell -ExecutionPolicy Bypass -File scripts\package.ps1   # 生成图形化安装 ZIP
 ```
 
 改了源码要去掉 `-SkipPublish`（会跑 `publish.ps1`）。安装完必须看到自检 **10/10 全绿**。
@@ -31,7 +32,8 @@ C# / .NET 8。**仓库不带 7-Zip 本体**：安装阶段由 `EngineProvisioner
 ```
 src/7zipContext.Core    后端与规则          src/7zipContext.Shell    现代菜单动词 comhost
 src/7zipContext.App     CLI + 设置面板        src/7zipContext.Classic  经典菜单 handler（内联树）
-package/         AppxManifest        scripts/          install/uninstall/publish/7zipContext-menu
+src/7zipContext.Setup   图形化安装卸载工具     release/              安装 ZIP（不提交）
+package/         AppxManifest        scripts/          install/uninstall/publish/package/7zipContext-menu
 tests/           冒烟测试 + 诊断（ComProbe/UiTest）
 dist/            发布产物 + 已注册 AppX 包根（勿删）       .workbuddy/  项目记忆（勿删）
 ```
@@ -110,6 +112,10 @@ dist/            发布产物 + 已注册 AppX 包根（勿删）       .workbud
     于是 `dotnet build 7zipContext.sln` 显示成功、跑的还是几小时前的旧 exe，
     「59/59 全绿」是假象（旧二进制还在找已删除的 `dist\tools\7z.exe`）。
     改完测试代码后确认 exe 时间戳，别只看 build 结果。
+30. **图形化安装包只是现有注册脚本的 GUI 外壳**：`7zipContext.Setup` 把 `payload\`
+    复制到 `%LOCALAPPDATA%\7zipContext\app\`，再隐藏调用 `install.ps1 -SkipPublish`；
+    不要另写一套注册逻辑。卸载同理复用 `uninstall.ps1`，本机已有 7-Zip 永远不删。
+    ZIP 由 `scripts\package.ps1` 生成，仍不得携带 7-Zip 本体。
 
 ## 当前状态
 
@@ -117,7 +123,8 @@ v2 全部落地：经典菜单内联目录树（规则见 `dist\7zipContext.ini`
 v1 主窗口/预览弹窗/文件关联/`IPreviewHandler` 全部移除（`7zipContext.Preview` 工程已删）、
 AppX 的 Preview 动词已退役（现代菜单 7 个动词）、自检 10 项（含引擎可用性）。
 引擎改为运行时获取，仓库与 `dist\` 均不携带 7-Zip 二进制。
-2026-11-11 追加轻量设置面板（`SettingsWindow.cs` / `AppSettings.cs`），由开始菜单图标打开。
+2026-11-11 追加轻量设置面板（`SettingsWindow.cs` / `AppSettings.cs`），由开始菜单图标打开；
+追加 `7zipContext.Setup` 图形化安装卸载工具与 `release\7zipContext-Setup.zip` 打包链。
 
 基线：SmokeTest 19/19、ComSmokeTest 59/59、install 自检 10/10（新增「7-Zip 引擎可用」）。
 同名菜单项重复通常来自机器上另一款压缩软件，本项目的经典菜单动词已全部改为自插以避开冲突。
