@@ -184,7 +184,7 @@ src/7zipContext.App      CLI（7zipContext.exe）   src/7zipContext.Classic  经
 src/7zipContext.Setup    图形化安装卸载工具
 package/          AppX 清单 + logo
 scripts/          install / uninstall / publish / package / 7zipContext-menu
-tests/            SmokeTest（Core 19）/ ComSmokeTest（动词 59）/ ComProbe / UiTest
+tests/            SmokeTest（Core 32）/ ComSmokeTest（动词 75）/ ComProbe / UiTest
 assets/           7zipContext.ico、7zipContext.png
 dist/             发布产物（也是已注册 AppX 包根，勿删）
 ```
@@ -193,8 +193,8 @@ dist/             发布产物（也是已注册 AppX 包根，勿删）
 
 ```powershell
 dotnet build 7zipContext.sln -c Release
-dotnet run --project tests/7zipContext.SmokeTest -c Release      # Core 19 项
-.\tests\7zipContext.ComSmokeTest\bin\Release\net8.0-windows\7zipContext.ComSmokeTest.exe   # 59 项
+dotnet run --project tests/7zipContext.SmokeTest -c Release      # Core 32 项
+.\tests\7zipContext.ComSmokeTest\bin\Release\net8.0-windows\7zipContext.ComSmokeTest.exe   # 动词 75 项
 .\tests\7zipContext.ComProbe\bin\Release\net8.0-windows\7zipContext.ComProbe.exe menu <file>  # 导出真实经典菜单树
 powershell -ExecutionPolicy Bypass -File scripts\publish.ps1            # 分项目发布再合并
 ```

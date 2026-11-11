@@ -1,8 +1,8 @@
 ﻿# 7zipContext · Agent 规则
 
-**不是压缩软件，是「7-Zip 引擎 + 自建右键菜单」的 shell 增强层。** 自用便携版。
-完整定位与冻结决策见 `SPEC-v2.md`；v1 的「主窗口 + 预览弹窗」形态已作废，
-但保留一个轻量 **设置面板**（开始菜单图标 / 无参启动 / `--settings` 打开）。
+**不是压缩软件，是「7-Zip 引擎 + 自建右键菜单」的 shell 增强层。** 公开项目，
+普通用户用图形化安装包，开发者用源码脚本。完整定位与冻结决策见 `SPEC-v2.md`；v1 的
+「主窗口 + 预览弹窗」形态已作废，但保留一个轻量 **设置面板**（开始菜单图标 / 无参启动 / `--settings` 打开）。
 仓库：`JourneyHua/7zipContext`（公开）。
 
 ## 怎么跑
@@ -24,8 +24,8 @@ C# / .NET 8。**仓库不带 7-Zip 本体**：安装阶段由 `EngineProvisioner
 落到 `%LOCALAPPDATA%\7zipContext\engine\{版本}\`；运行时由 `EngineLocator` 只读
 `engine.path` 定位 `7z.exe`（列表/测试）+ `7zG.exe`（压缩解压，自带进度窗和密码框）
 + `7zFM.exe`（默认打开方式）+ `7z.dll`。
-菜单有两套：AppX 清单 + `IExplorerCommand`（Win11 现代菜单，7 个动词）、
-`IContextMenu` comhost（经典菜单，内联目录树）。
+菜单有两套：AppX 清单 + `IExplorerCommand`（Win11 现代菜单，8 个动词，含「用 7-Zip 打开」）、
+`IContextMenu` comhost（经典菜单，内联目录树 + 同组解压/压缩/打开）。
 
 ## 目录
 
@@ -53,7 +53,7 @@ dist/            发布产物 + 已注册 AppX 包根（勿删）       .workbud
 7. **改 `.ps1` 必须带 UTF-8 BOM**（5.1 按 GBK 解析中文会雪崩）。唯一的例外是 `7zipContext-menu.ps1`——它保持**纯 ASCII**。改完先用 `[Parser]::ParseFile` 预检语法。
 8. **注册表键名含 `*`（`*\shellex\...`）必须用 `-LiteralPath` 或 .NET Registry API**，`Test-Path`/`Remove-Item` 会把 `*` 当通配符，静默查不到。
 9. **改完菜单/清单/Shell 代码必须重装并重启资源管理器**，`dotnet build` 成功不算验证。
-10. **验证菜单改动要跑真 COM 调用**：`7zipContext.ComSmokeTest`（59 项）+ `7zipContext.ComProbe menu <file>`（导出真实经典菜单树，能看清每条是谁加的）。
+10. **验证菜单改动要跑真 COM 调用**：`7zipContext.ComSmokeTest`（75 项）+ `7zipContext.ComProbe menu <file>`（导出真实经典菜单树，能看清每条是谁加的）。
 11. **不要删 `dist\`**（已注册 AppX 包根）；不要判 `git status` 干净就等于功能正常。
 12. **v1/改名前的残留只删代码是清不掉的**：旧 `IPreviewHandler` CLSID、`ShellEx\{8895b1c6}`、
     旧 ProgId（`yaya.zip` 等）、旧 handler 键（`yayaPreview`/`yayaClassicSpike`）必须靠
@@ -125,10 +125,11 @@ dist/            发布产物 + 已注册 AppX 包根（勿删）       .workbud
 
 v2 全部落地：经典菜单内联目录树（规则见 `dist\7zipContext.ini`）、压缩/解压走 `7zG.exe`、
 v1 主窗口/预览弹窗/文件关联/`IPreviewHandler` 全部移除（`7zipContext.Preview` 工程已删）、
-AppX 的 Preview 动词已退役（现代菜单 7 个动词）、自检 10 项（含引擎可用性）。
+AppX 的 Preview 动词已退役（现代菜单 8 个动词，含「用 7-Zip 打开」）、自检 10 项（含引擎可用性）。
 引擎改为运行时获取，仓库与 `dist\` 均不携带 7-Zip 二进制。
 2026-11-11 追加轻量设置面板（`SettingsWindow.cs` / `AppSettings.cs`），由开始菜单图标打开；
-追加 `7zipContext.Setup` 图形化安装卸载工具与 `release\7zipContext-Setup.zip` 打包链。
+追加 `7zipContext.Setup` 图形化安装卸载工具与 `release\7zipContext-Setup.zip` 打包链；
+分卷后缀与「用 7-Zip 打开」改为 `[archive]` 配置（见红线 31），发布 v1.1.0。
 
-基线：SmokeTest 19/19、ComSmokeTest 59/59、install 自检 10/10（新增「7-Zip 引擎可用」）。
+基线：SmokeTest 32/32、ComSmokeTest 75/75、install 自检 10/10（新增「7-Zip 引擎可用」）。
 同名菜单项重复通常来自机器上另一款压缩软件，本项目的经典菜单动词已全部改为自插以避开冲突。
