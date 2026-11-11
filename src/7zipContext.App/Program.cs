@@ -4,20 +4,19 @@ using ZipContext.Core;
 
 namespace ZipContext.App;
 
-/// <summary>CLI 分发器：右键菜单（经典 + Win11 COM 服务器）都通过命令行调用本程序。</summary>
+/// <summary>
+/// 分发器：右键菜单（经典 + Win11 COM 服务器）通过命令行调用本程序；
+/// 无参启动（开始菜单图标 / 双击 exe）与 --settings 打开设置面板。
+/// </summary>
 public static class Program
 {
     [STAThread]
     public static int Main(string[] args)
     {
-        // v2：7zipContext 不再有主窗口，本程序只是右键菜单的执行体。
-        if (args.Length == 0)
-        {
-            ShowInfo("7zipContext 是右键菜单工具，没有主窗口。\n\n" +
-                     "用法：在资源管理器里右键压缩包 → 显示更多选项。\n" +
-                     "预览内联树的显示规则见 dist\\7zipContext.ini。");
-            return 0;
-        }
+        // 开始菜单图标来自 AppX 的 Application 节点，激活时不带参数 → 打开设置窗口。
+        if (args.Length == 0) return OpenSettings();
+
+        if (args[0].Equals("--settings", StringComparison.OrdinalIgnoreCase)) return OpenSettings();
 
         var verb = args[0].ToLowerInvariant();
         var rest = args.Skip(1).ToArray();
@@ -56,9 +55,8 @@ public static class Program
                     if (rest.Length > 0) RunTest(rest[0]);
                     break;
                 case "--open":
-                    // v2 已删除主窗口：保留该分支只为兼容旧快捷方式，给个明确提示而不是静默失败
-                    ShowInfo("7zipContext 不提供主窗口。请在资源管理器里右键压缩包使用菜单。");
-                    break;
+                    // v1 旧快捷方式兼容：打开设置面板，而不是弹一句「没有主窗口」
+                    return OpenSettings();
                 case "--install":
                     ShellIntegration.ShellIntegration.Install();
                     break;
@@ -70,13 +68,9 @@ public static class Program
                     ShellIntegration.ShellIntegration.Uninstall();
                     break;
                 default:
-                    // 裸路径过去是"用主窗口打开"，主窗口已删除
-                    if (File.Exists(args[0]))
-                    {
-                        ShowInfo("7zipContext 不提供主窗口。请在资源管理器里右键压缩包使用菜单。");
-                    }
-                    else { ShowError($"未知命令：{verb}"); return 2; }
-                    break;
+                    // 裸路径（旧快捷方式 / 拖文件到 exe）→ 打开设置面板
+                    if (File.Exists(args[0])) return OpenSettings();
+                    ShowError($"未知命令：{verb}"); return 2;
             }
             return 0;
         }
@@ -92,6 +86,32 @@ public static class Program
 
     private static void ShowInfo(string message) =>
         MessageBox.Show(message, "7zipContext", MessageBoxButton.OK, MessageBoxImage.Information);
+
+    /// <summary>
+    /// 打开设置面板。WinExe 没有 Application 实例，必须显式建一个，
+    /// 否则 Window.ShowDialog 无法运行 Dispatcher 消息循环（窗口一闪而过或直接抛异常）。
+    /// 进程里只会有一个 Application；引擎命令不走这里，所以不会冲突。
+    /// </summary>
+    private static int OpenSettings()
+    {
+        try
+        {
+            var app = Application.Current ?? new Application
+            {
+                ShutdownMode = ShutdownMode.OnExplicitShutdown,
+            };
+            var window = new SettingsWindow();
+            app.MainWindow = window;
+            window.ShowDialog();
+            app.Shutdown();
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            ShowError($"无法打开设置窗口：{ex.Message}");
+            return 1;
+        }
+    }
 
     // ---------- 7-Zip 引擎：首次安装 / 更新检查 / 升级 ----------
 

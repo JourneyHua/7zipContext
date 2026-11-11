@@ -288,6 +288,7 @@ if ($menuRegistered) {
 }
 Say '  - 经典右键：右键 → 显示更多选项 → 智能解压到此处 ...' 'Gray'
 Say '  - 经典菜单预览：右键压缩包 → 菜单下半部分直接铺开包内结构（规则改 dist\7zipContext.ini）' 'Gray'
+Say '  - 设置面板：开始菜单的「7zipContext」，或 dist\7zipContext.exe --settings' 'Gray'
 Say '  - 检查 7-Zip 引擎更新：dist\7zipContext.exe --check-engine-update --show' 'Gray'
 Say '  - 升级 7-Zip 引擎：dist\7zipContext.exe --update-engine --show' 'Gray'
 Say '  - 卸载：powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1' 'Gray'

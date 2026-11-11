@@ -22,13 +22,26 @@ $plans = @(
 )
 
 # 经典菜单 handler 由 explorer.exe 进程内加载（托管 CLR 在 explorer 里跑），
-# 它会锁住 dist\classic\*.dll —— 发布前必须先让它卸载，发布后再拉起来。
-$killedExplorer = $false
-if (Get-Process -Name explorer -ErrorAction SilentlyContinue) {
-    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-    $killedExplorer = $true
-    Start-Sleep -Milliseconds 1200
+# 现代菜单动词由系统 dllhost.exe 承载 —— 两者都会锁住 dist\*.dll。
+# 只停 explorer 不够：菜单刚被点过/刚跑完安装自检时 dllhost 仍常驻，
+# 直接删 dist 会报 UnauthorizedAccessException（实测踩过）。
+function Stop-DistLockers {
+    Get-Process -Name '7zipContext.Shell', '7zipContext' -ErrorAction SilentlyContinue | ForEach-Object {
+        try { $_.Kill() } catch { }
+    }
+    Get-Process -Name dllhost -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            if ($_.Modules | Where-Object { $_.FileName -like '*7zipContext*' }) { $_.Kill() }
+        } catch { }
+    }
+    if (Get-Process -Name explorer -ErrorAction SilentlyContinue) {
+        Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    }
 }
+
+$killedExplorer = (Get-Process -Name explorer -ErrorAction SilentlyContinue) -ne $null
+Stop-DistLockers
+Start-Sleep -Milliseconds 1200
 
 foreach ($plan in $plans) {
     Write-Host "  发布 $($plan.Name) ..." -ForegroundColor DarkGray
@@ -40,7 +53,23 @@ foreach ($plan in $plans) {
 }
 
 # 合并到 dist（App 优先铺底运行时，后两个只添 comhost 产物）
-if (Test-Path $dist) { [System.IO.Directory]::Delete($dist, $true) }
+# 删除可能仍被残留句柄占用，重试几次并在每次重试前再清一遍锁。
+$deleted = $false
+for ($attempt = 1; $attempt -le 3 -and -not $deleted; $attempt++) {
+    try {
+        if (Test-Path $dist) { [System.IO.Directory]::Delete($dist, $true) }
+        $deleted = $true
+    } catch {
+        if ($attempt -eq 3) {
+            throw "无法清空 dist\（comhost dll 被占用）。最常见原因：刚在同一个 PowerShell 进程里跑过 " +
+                  "install.ps1 自检 —— 它会实例化进程内的经典菜单 COM，DLL 会一直锁在宿主进程里，" +
+                  "杀 explorer/dllhost 没用。请**新开一个 PowerShell 窗口**再跑 publish.ps1 或 install.ps1。" +
+                  "`n原始错误：$($_.Exception.Message)"
+        }
+        Stop-DistLockers
+        Start-Sleep -Milliseconds 900
+    }
+}
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 foreach ($plan in $plans) {
     Copy-Item (Join-Path $stage "$($plan.Name)\*") $dist -Recurse -Force

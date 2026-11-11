@@ -32,7 +32,7 @@
                  uap10:TrustLevel="mediumIL"
                  uap10:RuntimeBehavior="win32App">
       <uap:VisualElements DisplayName="7zipContext"
-                          Description="7-Zip 右键菜单工具"
+                          Description="7-Zip 右键菜单工具与设置"
                           Square150x150Logo="Square150x150Logo.png"
                           Square44x44Logo="Square44x44Logo.png"
                           BackgroundColor="transparent" />

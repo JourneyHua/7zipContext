@@ -30,7 +30,8 @@
 - **Win11 现代菜单**（右键第一层）：7 个动词，没有预览
 - **经典菜单**（右键 → 显示更多选项 / `Shift+F10`）：上面那 7 个 + 内联预览树
 
-进度条和密码框全部由 `7zG.exe` 提供（7-Zip 自己的窗口），7zipContext 不画任何 UI。
+进度条和密码框全部由 `7zG.exe` 提供（7-Zip 自己的窗口）。7zipContext 唯一的界面是设置面板，
+所有压缩/解压交互都不弹自己的窗口。
 
 ## 安装
 
@@ -50,6 +51,22 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -RestartExplorer
 | `-EnginePath <目录>` | 离线安装：指向本机已有的 7-Zip 目录（需含四件套） |
 | `-EngineSource <URL>` | GitHub 不可达时，指定可达的官方安装包 URL |
 | `-SkipEngineCheck` | 跳过「更新检查」提示（不影响引擎准备） |
+
+## 设置面板
+
+AppX 包在开始菜单注册了一个 **7zipContext** 图标，点它（或直接双击
+`dist\7zipContext.exe`、运行 `dist\7zipContext.exe --settings`）会打开设置面板，四个页签：
+
+| 页签 | 内容 |
+|------|------|
+| **预览规则** | 可视化编辑根目录条数、每层展开数、是否显示子层文件、展开层数；「保存」后下一次右键生效，可「恢复默认」或直接打开 ini |
+| **7-Zip 引擎** | 查看版本/来源/目录/SHA-256；一键「检查更新」「升级引擎」「重新检测」，或打开引擎目录 |
+| **默认打开方式** | 查看 `.zip/.7z/.rar` 的注册状态；重新注册，或打开系统「默认应用」页手动选一次 |
+| **关于** | 版本、许可与商标声明、项目主页、卸载说明 |
+
+设置窗口**只由无参启动触发**；右键菜单的所有动词以及 `--ensure-engine` 等引擎命令仍以隐藏窗口
+方式运行，绝不弹窗（否则会卡住 `install.ps1`）。预览规则仍可直接改 `dist\7zipContext.ini`，两种
+方式等价。
 
 ## 7-Zip 引擎
 
@@ -117,11 +134,12 @@ maxDepth=1              ; 展开层数 0/1/2
 ## 技术栈
 
 - **7zipContext.Core** — 7z 后端、智能解压规则、回收站删除、**引擎只读定位器**
-- **7zipContext.App** — 纯 CLI 执行体（无窗口），菜单唯一入口；**引擎获取与更新检查**
+- **7zipContext.App** — CLI 执行体 + **设置面板**（无参启动），菜单唯一入口；**引擎获取与更新检查**
 - **7zipContext.Shell** — Win11 `IExplorerCommand` 动词的 comhost 类库（7 个），由 dllhost 承载
 - **7zipContext.Classic** — 经典菜单 `IContextMenu` handler，**跑在 explorer.exe 进程内**，负责内联目录树
 
-v1 的 WPF 主窗口、设置页、预览弹窗、文件关联、`IPreviewHandler` 预览窗格**已全部移除**；
+v1 的 WPF 主窗口、预览弹窗、文件关联、`IPreviewHandler` 预览窗格**已全部移除**；
+设置能力以轻量设置面板的形式保留（不再是 v1 那个主窗口）。
 `install.ps1` 仍会清理老机器上的这些残留。
 
 ```
@@ -144,12 +162,15 @@ dotnet run --project tests/7zipContext.SmokeTest -c Release      # Core 19 项
 powershell -ExecutionPolicy Bypass -File scripts\publish.ps1            # 分项目发布再合并
 ```
 
-测试会走统一的引擎解析器；本机有 7-Zip 即可，无需额外准备二进制。
+`dotnet build 7zipContext.sln` 会连同 4 个测试工程一起编译。
+测试走统一的引擎解析器；本机有 7-Zip 即可，无需额外准备二进制。
 
 ## 排障
 
 - **右键点了没反应**：看 `%TEMP%\7zipContext-invoke-error.log`；`install.ps1` 的「菜单命令可执行」就是测这条。
 - **菜单里没有 7zipContext**：Win11 紧凑菜单只显示 AppX 动词；经典 handler 要「显示更多选项」。
+- **开始菜单里的 7zipContext 图标**：这是 AppX 包注册的应用入口，点开就是设置面板；
+  不想要它可以从 `package\AppxManifest.xml` 移除 `Applications` 节点后重装（但会改变包形态，需自行验证）。
 - **预览树是空的/只有一行灰字**：`%TEMP%\7zipContext-classic.log` 里有 `status=Timeout/Encrypted/Error`；
   超时说明包太大（250ms 硬超时），这是设计行为。
 - **提示「未找到 7-Zip 引擎」**：跑 `install.ps1`；离线用 `-EnginePath <本机 7-Zip 目录>`。
