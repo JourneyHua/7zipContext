@@ -29,10 +29,14 @@ public class ExplorerCommandBase : ComInterop.IExplorerCommand
         if (title.Contains("{name}", StringComparison.Ordinal))
         {
             var paths = ComInterop.GetPaths(psiItemArray);
-            if (paths.Count > 0)
+            // 解压类菜单文字用“实际解压目标”命名：分卷多选时取 .001，而不是父目录或 .002。
+            var displayPaths = IsExtractVerb(Verb)
+                ? ZipContext.Core.ArchiveSelection.TargetsForExtraction(paths)
+                : paths;
+            if (displayPaths.Count > 0)
             {
                 // 与 7zipContext.App 压缩输出共用命名规则：单选同名 / 多选父文件夹名
-                title = title.Replace("{name}", ZipContext.Core.NamingHelper.TargetBaseName(paths));
+                title = title.Replace("{name}", ZipContext.Core.NamingHelper.TargetBaseName(displayPaths));
             }
             else
             {
@@ -100,6 +104,12 @@ public class ExplorerCommandBase : ComInterop.IExplorerCommand
         var paths = ComInterop.GetPaths(psiItemArray);
         if (paths.Count == 0) return ComInterop.E_FAIL;
 
+        // 解压动词遇到分卷只传首卷；压缩动词仍传完整选择。
+        var targets = IsExtractVerb(Verb)
+            ? ZipContext.Core.ArchiveSelection.TargetsForExtraction(paths)
+            : paths;
+        if (targets.Count == 0) return ComInterop.E_FAIL;
+
         // 长操作全部交给 7zipContext.exe（独立进程，崩溃绝不拖垮 Explorer）
         // 注意：命令行必须用 ArgumentList（UseShellExecute=false）——
         // ShellExecute 路径不接受 ArgumentList，且在 dllhost 代理宿主里可能直接失败。
@@ -116,7 +126,7 @@ public class ExplorerCommandBase : ComInterop.IExplorerCommand
                 WorkingDirectory = Path.GetDirectoryName(exePath) ?? AppContext.BaseDirectory,
             };
             psi.ArgumentList.Add(Verb);
-            foreach (var p in paths) psi.ArgumentList.Add(p);
+            foreach (var p in targets) psi.ArgumentList.Add(p);
 
             System.Diagnostics.Process.Start(psi);
             return ComInterop.S_OK;
@@ -126,6 +136,10 @@ public class ExplorerCommandBase : ComInterop.IExplorerCommand
             return Fail("启动 7zipContext.exe 失败", ex);
         }
     }
+
+    private static bool IsExtractVerb(string verb) => verb is
+        "--smart-extract" or "--smart-extract-delete" or
+        "--extract-to-name" or "--extract-to";
 
     /// <summary>定位 7zipContext.exe：程序集所在目录 → AppContext.BaseDirectory → 进程目录 → 环境变量覆盖（测试用）。</summary>
     private static string? ResolveExe()

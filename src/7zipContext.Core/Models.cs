@@ -71,11 +71,17 @@ public static class ArchiveFormats
         ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".txz",
         ".zst", ".cab", ".iso", ".wim", ".arj", ".lzh", ".lha", ".z", ".taz", ".tpz",
         ".zipx", ".xpi", ".jar", ".apk", ".ar", ".cpio", ".rpm", ".deb", ".msi",
+        ".001", // 7-Zip 分卷首卷：xxx.7z.001 / xxx.zip.001
     };
 
     /// <summary>复合扩展名（.tar.gz 等）。返回去掉压缩后缀的基础名。</summary>
     public static string StripExtension(string fileName)
     {
+        // 分卷首卷要先去掉 .001，再走普通/复合扩展名规则：
+        // xxx.7z.001 → xxx；xxx.tar.gz.001 → xxx。
+        if (IsFirstSplitVolume(fileName))
+            fileName = fileName[..^".001".Length];
+
         var lower = fileName.ToLowerInvariant();
         foreach (var compound in new[] { ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst" })
             if (lower.EndsWith(compound))
@@ -83,8 +89,64 @@ public static class ArchiveFormats
         return Path.GetFileNameWithoutExtension(fileName);
     }
 
-    public static bool IsArchive(string path) =>
-        Extractable.Contains(Path.GetExtension(path));
+    public static bool IsArchive(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        if (Extractable.Contains(Path.GetExtension(path))) return true;
+
+        var lower = path.ToLowerInvariant();
+        return lower.EndsWith(".tar.gz") || lower.EndsWith(".tar.bz2") ||
+               lower.EndsWith(".tar.xz") || lower.EndsWith(".tar.zst");
+    }
+
+    /// <summary>是否是分卷首卷（.001）。只有首卷能交给 7-Zip 识别整个分卷组。</summary>
+    public static bool IsFirstSplitVolume(string path) =>
+        !string.IsNullOrWhiteSpace(path) &&
+        Path.GetExtension(path).Equals(".001", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>是否是分卷后续卷（.002、.003…）。后续卷不能单独作为压缩包打开。</summary>
+    public static bool IsLaterSplitVolume(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        var ext = Path.GetExtension(path);
+        return ext.Length == 4 && ext[0] == '.' &&
+               ext[1] is >= '0' and <= '9' &&
+               ext[2] is >= '0' and <= '9' &&
+               ext[3] is >= '0' and <= '9' &&
+               !IsFirstSplitVolume(path);
+    }
+
+    /// <summary>分卷组的基础名（去掉 .001/.002 等数字后缀），用于找同组文件。</summary>
+    public static string SplitVolumeBasePath(string path)
+    {
+        var full = Path.GetFullPath(path);
+        var ext = Path.GetExtension(full);
+        return ext.Length == 4 && ext[0] == '.' && char.IsDigit(ext[1]) &&
+               char.IsDigit(ext[2]) && char.IsDigit(ext[3])
+            ? full[..^ext.Length]
+            : full;
+    }
+
+    /// <summary>
+    /// 取同一分卷组的全部已存在文件（从 .001 开始连续查找）。
+    /// 传入非首卷时只返回该文件自身，避免把 .002 当成整组。
+    /// </summary>
+    public static IReadOnlyList<string> SplitVolumeFiles(string path)
+    {
+        var first = Path.GetFullPath(path);
+        if (!IsFirstSplitVolume(first)) return new[] { first };
+
+        var dir = Path.GetDirectoryName(first) ?? "";
+        var prefix = Path.GetFileName(SplitVolumeBasePath(first)) + ".";
+        var files = new List<string> { first };
+        for (var i = 2; ; i++)
+        {
+            var candidate = Path.Combine(dir, $"{prefix}{i:000}");
+            if (!File.Exists(candidate)) break;
+            files.Add(candidate);
+        }
+        return files;
+    }
 
     /// <summary>格式化文件大小（1.2 GB 形式）。</summary>
     public static string HumanSize(long bytes)

@@ -169,7 +169,7 @@ public static class Program
         var smart = new SmartExtractService(sevenZip);
         int ok = 0, fail = 0;
 
-        foreach (var archive in archives.Where(File.Exists))
+        foreach (var archive in ArchiveSelection.TargetsForExtraction(archives).Where(File.Exists))
         {
             string? password = null;
             while (true)
@@ -197,7 +197,7 @@ public static class Program
     private static void RunExtractToName(string[] archives)
     {
         var sevenZip = new SevenZipService();
-        foreach (var archive in archives.Where(File.Exists))
+        foreach (var archive in ArchiveSelection.TargetsForExtraction(archives).Where(File.Exists))
         {
             var dest = Path.Combine(
                 Path.GetDirectoryName(Path.GetFullPath(archive))!,

@@ -88,10 +88,22 @@ public sealed class SmartExtractService
         bool deleted = false;
         if (deleteAfter)
         {
-            progress?.Report("解压成功，正在把压缩包移入回收站...");
-            deleted = RecycleBinService.SendToRecycleBin(archivePath, out var delErr);
-            if (!deleted)
-                return new SmartExtractResult(plan, true, $"解压成功，但删除压缩包失败：{delErr}", false);
+            progress?.Report("解压成功，正在把分卷文件移入回收站...");
+            // 分卷包要删整组：只删 .001 会留下 .002 等孤儿文件。
+            var volumeFiles = ArchiveFormats.SplitVolumeFiles(archivePath);
+            string? deleteError = null;
+            var allDeleted = true;
+            foreach (var file in volumeFiles)
+            {
+                if (RecycleBinService.SendToRecycleBin(file, out var oneError)) continue;
+                allDeleted = false;
+                deleteError ??= $"{Path.GetFileName(file)}：{oneError}";
+            }
+
+            if (!allDeleted)
+                return new SmartExtractResult(plan, true, $"解压成功，但删除分卷文件失败：{deleteError}", false);
+
+            deleted = true;
         }
         return new SmartExtractResult(plan, true, null, deleted);
     }

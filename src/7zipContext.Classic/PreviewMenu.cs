@@ -29,6 +29,7 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
 
     private readonly List<string> _paths = new();
     private readonly List<string> _commands = new(); // 菜单 id 偏移 → CLI 动词
+    private readonly List<string> _extractTargets = new(); // 实际解压目标：分卷只保留 .001
     private string? _archive;
 
     // ---------------- IShellExtInit ----------------
@@ -40,9 +41,13 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
             _archive = null;
             _paths.Clear();
             _commands.Clear();
+            _extractTargets.Clear();
 
             foreach (var p in ShellData.SelectedPaths(pDataObj))
                 if (File.Exists(p) || Directory.Exists(p)) _paths.Add(p);
+
+            // 解压目标统一走 Core：包含 .001 时只保留首卷，.002 等后续卷不重复解压。
+            _extractTargets.AddRange(ZipContext.Core.ArchiveSelection.TargetsForExtraction(_paths));
 
             // 只有「单选且是压缩包」才做预览树；其余只给压缩动词
             if (_paths.Count == 1 && ArchiveFormats.IsArchive(_paths[0]))
@@ -64,19 +69,26 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
             var baseName = ZipContext.Core.NamingHelper.TargetBaseName(_paths);
             if (baseName.Length > 32) baseName = baseName[..32] + "…";
 
+            // 分卷多选（xxx.7z.001 + xxx.7z.002）也要显示解压组；
+            // 普通多选压缩包保持经典菜单原有“单选才给解压”的行为，不悄悄扩大范围。
+            var showExtract = _archive is not null ||
+                (_paths.Count > 1 && _paths.Any(ZipContext.Core.ArchiveFormats.IsFirstSplitVolume));
+            var extractBaseName = ZipContext.Core.NamingHelper.TargetBaseName(_extractTargets);
+            if (extractBaseName.Length > 32) extractBaseName = extractBaseName[..32] + "…";
+
             _commands.Clear();
             uint pos = indexMenu;
             uint id = (uint)idCmdFirst;
 
             AddItem(hMenu, ref pos, NativeMethods.MF_SEPARATOR, null, IntPtr.Zero);
 
-            if (_archive is not null)
+            if (showExtract)
             {
                 var extract = new (string Text, string Verb)[]
                 {
                     ("智能解压到此处(S)", "--smart-extract"),
                     ("智能解压到此处并删除", "--smart-extract-delete"),
-                    ($"解压到 {baseName}\\(T)", "--extract-to-name"),
+                    ($"解压到 {extractBaseName}\\(T)", "--extract-to-name"),
                     ("解压到其他文件夹(B)...", "--extract-to"),
                 };
                 foreach (var (text, verb) in extract)
@@ -140,7 +152,10 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
             var idx = (int)verb;
             if (idx < 0 || idx >= _commands.Count) return 0;
 
-            Launch(_commands[idx], _paths);
+            var command = _commands[idx];
+            // 解压动词只收首卷；压缩动词仍使用完整选择。
+            var targets = IsExtractVerb(command) ? _extractTargets : _paths;
+            Launch(command, targets);
             return 0;
         }
         catch (Exception ex)
@@ -204,6 +219,10 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
         }
         return "7zipContext.exe";
     }
+
+    private static bool IsExtractVerb(string verb) => verb is
+        "--smart-extract" or "--smart-extract-delete" or
+        "--extract-to-name" or "--extract-to";
 
     private static void Launch(string verb, IReadOnlyList<string> paths)
     {

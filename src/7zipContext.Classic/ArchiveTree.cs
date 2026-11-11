@@ -65,19 +65,8 @@ internal static class ShellData
 
 internal static class ArchiveFormats
 {
-    private static readonly HashSet<string> Ext = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".txz",
-        ".zst", ".cab", ".iso", ".arj", ".lzh", ".zipx", ".wim", ".rar5",
-    };
-
-    public static bool IsArchive(string path)
-    {
-        if (!File.Exists(path)) return false;
-        if (Ext.Contains(Path.GetExtension(path))) return true;
-        var lower = path.ToLowerInvariant();
-        return lower.EndsWith(".tar.gz") || lower.EndsWith(".tar.bz2") || lower.EndsWith(".tar.xz");
-    }
+    // 识别规则统一由 Core 提供：普通压缩包 + .001 分卷首卷 + .tar.gz 等复合扩展。
+    public static bool IsArchive(string path) => ZipContext.Core.ArchiveFormats.IsArchive(path);
 }
 
 public enum TreeStatus { Ok, Empty, Timeout, Unsupported, Error }

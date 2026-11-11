@@ -156,6 +156,33 @@ Console.WriteLine("\n[6] 压缩输出命名规则（菜单文字与输出一致�
     Check("tar.gz 复合扩展", z == "backup");
 }
 
+Console.WriteLine("\n[7] 分卷文件识别与菜单去重");
+{
+    var first = Path.Combine(work, "split.7z.001");
+    var later = Path.Combine(work, "split.7z.002");
+    var normal = Path.Combine(work, "notes.txt");
+    await File.WriteAllTextAsync(first, "first");
+    await File.WriteAllTextAsync(later, "later");
+    await File.WriteAllTextAsync(normal, "normal");
+
+    Check(".001 识别为可分卷压缩包", ArchiveFormats.IsArchive(first) && ArchiveFormats.IsFirstSplitVolume(first));
+    Check(".002 不当独立压缩包", !ArchiveFormats.IsArchive(later) && !ArchiveFormats.IsFirstSplitVolume(later));
+    Check("多选 .001 + .002 显示解压", ArchiveSelection.CanExtract(new[] { first, later }));
+    Check("多选 .001 + 普通文件也显示解压", ArchiveSelection.CanExtract(new[] { first, normal }));
+    Check("单选 .002 不显示解压", !ArchiveSelection.CanExtract(new[] { later }));
+
+    var targets = ArchiveSelection.TargetsForExtraction(new[] { first, later, normal });
+    Check("执行只保留首卷", targets.Count == 1 &&
+        string.Equals(targets[0], first, StringComparison.OrdinalIgnoreCase));
+
+    Check("分卷菜单命名去掉 .001 和 .7z",
+        ArchiveFormats.StripExtension("split.7z.001") == "split" &&
+        NamingHelper.ExtractFolderName(first) == "split");
+    Check("分卷组删除范围包含后续卷", ArchiveFormats.SplitVolumeFiles(first).Count == 2 &&
+        ArchiveFormats.SplitVolumeFiles(first).Any(p =>
+            string.Equals(p, later, StringComparison.OrdinalIgnoreCase)));
+}
+
 Console.WriteLine($"\n========== 结果: {passed} 通过 / {failed} 失败 ==========");
 Directory.Delete(work, true);
 return failed == 0 ? 0 : 1;

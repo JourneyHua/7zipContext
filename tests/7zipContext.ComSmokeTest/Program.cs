@@ -261,6 +261,46 @@ internal static class Program
             Check("AddZip.Invoke → 生成 x.zip", ok);
         }
 
+        Console.WriteLine("\n[5] 分卷压缩包：.001 显示解压，.002 不显示");
+        {
+            var randomBytes = new byte[3 * 1024 * 1024];
+            Random.Shared.NextBytes(randomBytes);
+            var random = Path.Combine(work, "random.bin");
+            File.WriteAllBytes(random, randomBytes);
+            var splitFirst = Path.Combine(work, "split.7z.001");
+            Run7z(work, "a", "-t7z", "-v1m", Path.Combine(work, "split.7z"), "random.bin",
+                "-y", "-bso0", "-bsp0");
+            var splitLater = Path.Combine(work, "split.7z.002");
+            Check("分卷包已生成", File.Exists(splitFirst) && File.Exists(splitLater));
+
+            var arrFirst = MakeArray(splitFirst);
+            foreach (var name in new[] { "SmartExtract", "SmartExtractDelete", "ExtractToName", "ExtractToFolder" })
+            {
+                if (!commands.TryGetValue(name, out var cmd)) continue;
+                cmd.GetState(arrFirst, true, out var state);
+                Check($"{name}: 单选 .001 → 显示", state == ECS_ENABLED, $"state={state}");
+            }
+
+            if (commands.TryGetValue("SmartExtract", out var laterCmd))
+            {
+                laterCmd.GetState(MakeArray(splitLater), true, out var laterState);
+                Check("SmartExtract: 单选 .002 → 隐藏", laterState == ECS_HIDDEN, $"state={laterState}");
+            }
+
+            if (commands.TryGetValue("ExtractToName", out var titleCmd))
+            {
+                titleCmd.GetTitle(arrFirst, out var pSplitTitle);
+                var splitTitle = CoTaskMemToStringAndFree(pSplitTitle);
+                Check("ExtractToName: 分卷标题去掉 .001/.7z", splitTitle is { Length: > 0 } &&
+                    splitTitle.Contains("split", StringComparison.OrdinalIgnoreCase), $"\"{splitTitle}\"");
+            }
+
+            InvokeVia("SmartExtract", arrFirst);
+            var ok = SpinWait(() => File.Exists(Path.Combine(work, "split", "random.bin")));
+            Check("SmartExtract.Invoke → 分卷只解一次", ok &&
+                File.Exists(splitFirst) && File.Exists(splitLater));
+        }
+
         Console.WriteLine($"\n========== 结果: {_passed} 通过 / {_failed} 失败 ==========");
 
         foreach (var p in Process.GetProcessesByName("7zipContext.Shell"))
