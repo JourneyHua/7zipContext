@@ -1,6 +1,6 @@
 # Icon source and exports
 
-`icon-source.ico` is the single editable source: a byte-for-byte copy of the existing project icon at the 2026-11-12 audit. Its 16/32/48/256 pixel frames are retained, without redrawing or downloading artwork. This is a preservation source, not a newly created vector master.
+`icon-source.ico` is the single editable source: the project icon in ICO format. Its 16/32/48/256 pixel frames are retained, without redrawing or downloading artwork. This is a preservation source, not a newly created vector master.
 
 Use Python 3.10+ and `Pillow==12.1.1` (`scripts/requirements-icons.txt`). Run from any working directory:
 

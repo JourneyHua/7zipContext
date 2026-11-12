@@ -26,22 +26,33 @@ if (-not $SkipAppPublish) {
 }
 
 & $dotnet publish (Join-Path $root 'src\7zipContext.Setup\7zipContext.Setup.csproj') `
-    -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false `
+    -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false `
     -o $setupOut --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw '安装工具发布失败' }
 
 # install.ps1 的「菜单命令可执行（Invoke 实测）」必须保留，所以 ComProbe 也进 payload。
 & $dotnet publish (Join-Path $root 'tests\7zipContext.ComProbe\7zipContext.ComProbe.csproj') `
-    -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false `
+    -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false `
     -o $comprobeOut --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw 'ComProbe 发布失败' }
+
+# SkipAppPublish must not silently package a previous self-contained dist.
+if (Test-Path -LiteralPath (Join-Path $root 'dist\coreclr.dll')) {
+    throw 'dist 包含旧的自包含运行时，请先重新发布框架依赖版本，再打包。'
+}
+$runtimeConfigPath = Join-Path $root 'dist\7zipContext.runtimeconfig.json'
+$runtimeConfig = Get-Content -LiteralPath $runtimeConfigPath -Raw | ConvertFrom-Json
+$frameworks = @($runtimeConfig.runtimeOptions.frameworks) + @($runtimeConfig.runtimeOptions.framework)
+if (-not ($frameworks | Where-Object { $_.name -eq 'Microsoft.WindowsDesktop.App' -and $_.version -like '8.*' })) {
+    throw '主程序必须依赖系统 .NET 8 Desktop Runtime。'
+}
 
 if (Test-Path -LiteralPath $bundle) { Remove-DeploymentWorkspace $bundle $release }
 New-Item -ItemType Directory -Path $bundle -Force | Out-Null
 New-Item -ItemType Directory -Path $release -Force | Out-Null
 
-# 安装器自身保持框架依赖（Shell/Classic 本来就需要 .NET 8 Desktop Runtime），
-# 主程序仍由 publish.ps1 自包含发布，避免在 ZIP 里重复携带两套运行时。
+# 主程序、安装器和菜单组件统一依赖系统 .NET 8 Desktop Runtime x64。
+# 安装包只携带项目组件，不附带运行时。
 Copy-Item (Join-Path $setupOut '*') $bundle -Recurse -Force
 
 $payload = Join-Path $bundle 'payload'
@@ -61,6 +72,9 @@ $expected = @(
     '7zipContext.Setup.exe',
     'ZipContext.Core.dll',
     'payload\dist\7zipContext.exe',
+    'payload\dist\7zipContext.dll',
+    'payload\dist\7zipContext.runtimeconfig.json',
+    'payload\dist\7zipContext.deps.json',
     'payload\dist\7zipContext.Shell.comhost.dll',
     'payload\dist\7zipContext.Classic.comhost.dll',
     'payload\scripts\install.ps1',
@@ -79,10 +93,12 @@ $guide = @'
 ========================
 
 安装：
-1. 完整解压本 ZIP，不要直接在压缩软件窗口里运行。
-2. 双击 7zipContext.Setup.exe。
-3. 点击「安装 / 修复」，等待窗口提示成功。
-4. 可选：勾选「设为默认打开方式」（默认不勾选），安装成功后在系统设置中为 .zip/.7z/.rar 选择 7-Zip。
+1. 先安装 .NET 8 Desktop Runtime x64（已有则跳过）：
+   https://dotnet.microsoft.com/download/dotnet/8.0
+2. 完整解压本 ZIP，不要直接在压缩软件窗口里运行。
+3. 双击 7zipContext.Setup.exe。
+4. 点击「安装 / 修复」，等待窗口提示成功。
+5. 可选：勾选「设为默认打开方式」（默认不勾选），安装成功后在系统设置中为 .zip/.7z/.rar 选择 7-Zip。
    安装和修复只添加可选打开方式，保留现有默认程序。
 
 安装位置：%LOCALAPPDATA%\7zipContext\app\
@@ -100,7 +116,8 @@ $guide = @'
 
 注意：
 - 支持 Windows 11 x64，无需管理员权限。
-- 菜单扩展需要 .NET 8 Desktop Runtime；若系统提示缺少运行时，请先安装：
+- 主程序、安装器和菜单扩展均需要系统 .NET 8 Desktop Runtime x64；本 ZIP 不包含运行时。
+  缺少时请手动安装：
   https://dotnet.microsoft.com/download/dotnet/8.0
 - 安装和卸载期间资源管理器会短暂重启，这是正常现象。
 '@
@@ -125,7 +142,10 @@ if (Test-Path -LiteralPath $stage) {
     catch { Write-Warning ('安装包已生成，准备目录保留：' + $_) }
 }
 
-$hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+$sha256 = [Security.Cryptography.SHA256]::Create()
+$zipStream = [IO.File]::OpenRead($zip)
+try { $hash = [BitConverter]::ToString($sha256.ComputeHash($zipStream)).Replace('-', '') }
+finally { $zipStream.Dispose(); $sha256.Dispose() }
 Write-Host "安装包已生成：$zip" -ForegroundColor Green
 Write-Host "SHA256：$hash" -ForegroundColor DarkGray
 

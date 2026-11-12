@@ -1,7 +1,5 @@
 # 7zipContext
 
-> 当前源码包含本轮修复，现有安装包尚未更新，新产物系统验收仍待完成。现行行为见[SPEC-v2.md](SPEC-v2.md)，技术变更见[变更摘要](docs/CHANGELOG-AUDIT.md)，待验收项目见[发布验收矩阵](docs/RELEASE-VALIDATION.md)。旧安装日志不覆盖本轮后续源码。
-
 给 7-Zip 补一套干净的 Windows 11 右键菜单。
 
 **这不是压缩软件，而是 7-Zip 的 shell 增强层。** 压缩、解压、加密、分卷、进度条、密码框
@@ -50,6 +48,8 @@
 ## 安装
 
 ### 普通用户：图形化安装包
+
+先安装 [.NET 8 Desktop Runtime x64](https://dotnet.microsoft.com/download/dotnet/8.0)（已有则跳过）。主程序、安装器和菜单扩展共用系统运行库，ZIP 不附带 .NET；缺少时需手动安装。
 
 1. 下载并**完整解压** [7zipContext-Setup.zip](https://github.com/JourneyHua/7zipContext/releases/latest)，不要直接在压缩软件窗口里运行。
 2. 双击 `7zipContext.Setup.exe`，点击 **「安装 / 修复」**。
@@ -256,10 +256,12 @@ $process.ExitCode
 含空格的输入路径需要按调用环境正确引用；以 `--` 开头的文件名请使用完整路径。
 ## 开发
 
+技术规格见 [SPEC-v2.md](SPEC-v2.md)，测试流程见[发布验证](docs/RELEASE-VALIDATION.md)。版本更新说明见 [GitHub Releases](https://github.com/JourneyHua/7zipContext/releases)。
+
 ```powershell
 dotnet build 7zipContext.sln -c Release
-dotnet run --project tests/7zipContext.SmokeTest -c Release      # Core 32 项
-.\tests\7zipContext.ComSmokeTest\bin\Release\net8.0-windows\7zipContext.ComSmokeTest.exe   # 动词 75 项
+dotnet run --project tests/7zipContext.SmokeTest -c Release      # Core 测试
+.\tests\7zipContext.ComSmokeTest\bin\Release\net8.0-windows\7zipContext.ComSmokeTest.exe   # COM 菜单测试
 .\tests\7zipContext.ComProbe\bin\Release\net8.0-windows\7zipContext.ComProbe.exe menu <file>  # 导出真实经典菜单树
 powershell -ExecutionPolicy Bypass -File scripts\publish.ps1            # 分项目发布再合并
 ```
@@ -302,18 +304,3 @@ powershell -ExecutionPolicy Bypass -File scripts\publish.ps1            # 分项
 **关系声明**：7zipContext 是独立的第三方 shell 扩展，不是 7-Zip 官方项目，与 Igor Pavlov
 及 7-Zip 项目无关联、未获其背书。「7-Zip」及其图标归各自权利人所有，本仓库使用它们仅为
 标明所调用的压缩引擎。
-
-2026-11-12 更新检查策略：使用 update-check.json 原子保存尝试时间、成功时间、连续失败次数、下次请求时间和历史结论，绑定当前引擎规范目录与版本。成功缓存 24 小时；失败等待 15、30、60、120、240 分钟，随后最多 6 小时；--force 跳过等待。请求前先记录尝试，未完成请求暂缓 5 分钟；无法记录则不请求。失败不清除同一引擎的历史成功结论，但明确标为历史结果，CLI 仍返回 1。结果展示尝试/成功/下次请求 UTC 时间；旧 last-update-check、last-update-result.json 不再作为有效缓存，因其缺少引擎身份，首次按新策略重查。此变更不改变下载来源、校验或许可。
-2026-11-12：CLI 的 --engine-source / -EngineSource 均返回参数错误（2），安装脚本保留同名旧参数仅用于在任何安装操作前明确报错；引擎 API 同样拒绝非 null 自定义源。仅保留官方 Release 下载及本机离线引擎；不会把被拒绝的 URL 静默改用官方源。
-
-2026-11-12 卸载审查决定：-Purge/-PurgeEngine 删除失败必须报告路径并返回非零退出码，不得提示全部完成；注册残留时暂不删除程序及引擎，保留重试条件。引擎逐目录核验 engine-records 的路径绑定来源（兼容匹配的旧 engine.json），仅删除确认 downloaded 的目录；本机、未知或冲突来源保留并列出，不清空整个 engine 根目录。删除目录成功后才清理对应来源记录；仅当当前指针目标已删除，才清理指针及相关查询状态。锁失败、重解析路径及目录越界均拒绝删除。测试命令：powershell -NoProfile -ExecutionPolicy Bypass -File tests\purge-engine.ps1，仅操作自行创建的临时目录，不执行真实卸载。
-2026-11-12 混选规则：ArchiveSelection 统一生成解压目标，保留选中顺序；传统 ZIP 的 .z01 归一至配套 .zip，后续卷不独立执行，路径按完整路径及忽略大小写去重。普通压缩包和不同分卷组共同处理。现代/经典菜单有至少一个支持目标即可显示解压项，只传有效目标；纯普通文件或仅后续卷不显示解压。直接 CLI 调用仍报告不存在或不支持的输入，并汇总有效目标执行结果，不静默视为全部成功。未知分卷格式仍不猜测入口，自动删除的安全约束不变。
-2026-11-12 配置规则：Core.SettingsDocument 是设置面板、预览菜单和 ArchiveRules 的共享读写模型及唯一默认模板。缺失键使用默认值；明确存在但为空的 splitFirstSuffixes / splitLaterSuffixes 表示空列表，不恢复默认。设置面板允许清空，只有点击“恢复默认”才恢复默认列表。空首卷列表关闭后缀启用的分卷入口；普通压缩包（包括传统ZIP的.zip入口）及内建后续卷安全保护仍保留，自动删除约束不变。
-
-保存重新读取磁盘内容，只更新已知键；保留未知键、未知段落、独立/行内注释及已有UTF-8 BOM和换行风格。旧键名splitFirst/splitLater继续支持，重复已知键同步更新，读取仍以最后一个有效设置为准。缺失的已知键补入相应段落，已有用户扩展不会因“恢复默认”丢失。菜单缺失配置时只用内存默认值，不自动写文件；首次创建由设置面板显式保存完成。未提供多进程配置编辑事务，已知字段同时修改仍以最后保存者为准。
-2026-11-12 树与诊断资源审查决定：保留TreeNode及诊断命令接口。未暴露子节点列表的建树路径使用字典索引；Children/RootEntries一旦被调用方获取，后续插入会重建该节点索引，以兼容持有List后直接Clear/替换等操作。文件/目录同名及大小写区分语义不变。
-
-Classic菜单日志和Shell调用错误日志统一使用BoundedLog：主文件最多1 MiB，保留一份同上限的.1备份，每条最多4096字符后附截断标记；旧超大文件在下一次写入时清理。跨进程独占.lock文件协调，不等待重试，忙或写入失败时跳过该条日志。依赖文件系统调用的日志不是硬实时操作，旧版本不参与此协议。
-
-诊断工具共享NativeResources，PIDL/COM指针/RCW/HMENU/临时缓冲区按作用域释放，早退及异常仍清理；UI诊断计时器在退出前等待自身回调完成，回调不再同步Invoke界面线程。无界面回归只创建并销毁未显示菜单对象；本次不运行真实COM激活、弹出菜单、截图或菜单命令。
-2026-11-12 图标规则：以assets/icon-source.ico为唯一编辑源，保留现有16/32/48/256像素图像。scripts/gen_icon.py统一导出assets/7zipContext.ico、256像素PNG及package下44/150/50像素的AppX PNG；不重新设计图标、不下载素材、不修改dist。使用Python 3.10+及scripts/requirements-icons.txt固定的Pillow版本。python scripts/gen_icon.py生成全部资源；追加--check只比较不写入，缺失或过期返回1；python tests/test_icons.py执行隔离验证。生成结果不独立编辑，详细流程见assets/README.md。

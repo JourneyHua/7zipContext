@@ -35,14 +35,14 @@ try {
     $dotnet = Join-Path $env:USERPROFILE '.dotnet\dotnet.exe'
     if (-not (Test-Path -LiteralPath $dotnet)) { $dotnet = 'dotnet' }
     $plans = @(
-        @{ Name = '7zipContext.App'; SelfContained = 'true' },
+        @{ Name = '7zipContext.App'; SelfContained = 'false' },
         @{ Name = '7zipContext.Shell'; SelfContained = 'false' },
         @{ Name = '7zipContext.Classic'; SelfContained = 'false' }
     )
     foreach ($plan in $plans) {
         Write-Host "发布 $($plan.Name) ..." -ForegroundColor DarkGray
         & $dotnet publish (Join-Path $root "src\$($plan.Name)\$($plan.Name).csproj") `
-            -c Release -r win-x64 --self-contained $plan.SelfContained -p:PublishSingleFile=false `
+            -c Release -r win-x64 --self-contained $plan.SelfContained -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false `
             -o (Join-Path $stage $plan.Name) --nologo -v q | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "$($plan.Name) 发布失败，当前程序文件尚未更改。" }
     }
@@ -54,7 +54,8 @@ try {
         Copy-Item -LiteralPath (Join-Path $root $file) -Destination (Join-Path $candidate $file) -Force
     }
     $expected = @('7zipContext.exe', '7zipContext.Shell.comhost.dll', '7zipContext.Classic.comhost.dll',
-                  'LICENSE', 'THIRD-PARTY-NOTICES.md', 'coreclr.dll')
+                  'LICENSE', 'THIRD-PARTY-NOTICES.md', '7zipContext.dll', '7zipContext.runtimeconfig.json',
+                  '7zipContext.deps.json', 'ZipContext.Core.dll')
     $missing = $expected | Where-Object { -not (Test-Path -LiteralPath (Join-Path $candidate $_)) }
     if ($missing.Count) { throw "候选产物缺失：$($missing -join ', ')" }
     # All compilation, merging, validation and backup finish before stopping shell hosts.

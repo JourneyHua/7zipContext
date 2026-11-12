@@ -1,6 +1,6 @@
 # 7zipContext v2 现行规格
 
-更新：2026-11-12。本文是当前源码行为的统一规范，不表示安装包已经更新或通过系统集成验收。技术变更见[变更摘要](docs/CHANGELOG-AUDIT.md)，验证状态见[发布验收矩阵](docs/RELEASE-VALIDATION.md)。
+本文描述当前源码的行为与接口。安装与使用见 [README](README.md)，测试流程见[发布验证](docs/RELEASE-VALIDATION.md)。
 
 ## 产品边界
 
@@ -18,7 +18,7 @@
 | Classic | 经典菜单IContextMenu与内联目录树，Explorer进程内运行 |
 | Setup | 用户目录安装卸载界面，复用同一套PowerShell注册和自检脚本 |
 
-App自包含发布；Shell和Classic必须分别以依赖框架方式发布后合并，不能共用输出目录。comhost需要对应.NET 8运行时，桌面工具依赖与包完整性必须在新环境验证。dist是已注册AppX根目录，发布不得整体删除或重命名。
+App、Setup、Shell和Classic均以依赖框架方式发布，共用系统 .NET 8 Desktop Runtime x64。各工程分别发布后合并，不能共用输出目录，ZIP 不携带运行库。comhost需要对应.NET 8运行时，桌面工具依赖与包完整性必须在新环境验证。dist是已注册AppX根目录，发布不得整体删除或重命名。
 
 安装、卸载、发布、打包与引擎操作先取部署租约，再取引擎锁。子任务持有组句柄，父任务退出后仍阻止独立部署；长期设置窗口清除继承凭据。先后台编译/准备/校验/备份，再短暂停止占用宿主并逐文件切换。事务持久化日志支持失败及中断恢复，保留最新INI；恢复失败留备份。系统注册不能与文件原子提交，失败须单独说明，不能重放会清除用户默认选择的旧安装逻辑。
 
@@ -36,7 +36,7 @@ GUI安装至用户本地7zipContext/app目录，复用install.ps1与10项安装�
 | QuickZip | 快速ZIP；非交互模式不打开结果目录 |
 | OpenWithSevenZip | 启动7zFM，受openWithSevenZip控制 |
 
-经典菜单由handler自插对应操作及内联预览；现代菜单不提供预览树。AddZip/Add7z的现代清单挂载在Directory，通用文件挂载包含四种解压、QuickZip和OpenWithSevenZip。不得按旧“7动词/7条”描述验收。
+经典菜单由handler自插对应操作及内联预览；现代菜单不提供预览树。AddZip/Add7z的现代清单挂载在Directory，通用文件挂载包含四种解压、QuickZip和OpenWithSevenZip。
 
 设置面板五个页签：预览规则、分卷与打开、7-Zip引擎、默认打开方式、关于。无参、--settings、--open和兼容裸文件路径可打开；非交互模式禁止这些打开界面的入口。菜单和引擎管理不得因无Application实例而意外打开设置面板。
 
@@ -76,7 +76,7 @@ Classic与Shell错误日志主文件最多1 MiB，另留一份同上限备份；
 
 优先级为现有缓存、PATH（包括shim解引用）、注册表、常见位置、官方Release。四件套7z.exe/7zG.exe/7zFM.exe/7z.dll完整才可用；本机可用时准备引擎不联网。EngineLocator只读本机信息，不联网、不起进程。
 
-只允许官方Release API选择的带SHA256 digest资产；系统tar解包，保留License及旧版本。自定义URL在CLI、脚本及API被拒绝，不回退Authenticode或镜像；离线仅通过EnginePath采用本机引擎。官方下载当前仍全量读入内存，未设大小上限，这是已记录的限制。
+只允许官方Release API选择的带SHA256 digest资产；系统tar解包，保留License及旧版本。自定义URL在CLI、脚本及API被拒绝，不回退Authenticode或镜像；离线仅通过EnginePath采用本机引擎。官方下载当前仍全量读入内存，未设大小上限，。
 
 目录绑定的engine-records先保存，再原子切换engine.path；engine.json仅为兼容快照。更新检查绑定引擎规范目录和版本，分开记录尝试与成功，成功缓存24小时，失败15分钟至6小时退避，force可绕过。未完成请求暂缓5分钟，无法记录尝试则不请求。离线历史结果标明时间，CLI仍返回失败，不影响既有引擎使用。
 
@@ -99,7 +99,3 @@ Classic与Shell错误日志主文件最多1 MiB，另留一份同上限备份；
 多包有成功与其他非成功结果混合返回4；无成功时失败优先于参数错误、参数错误优先于取消。引擎原始0/1/7/255映射0/4/2/3。隐藏引擎及注册命令不弹错误对话框，显式show与非交互模式冲突。细节和示例见README。
 
 assets/icon-source.ico是唯一图标源，保留16/32/48/256帧；gen_icon.py导出程序ICO和256/44/150/50像素PNG。使用固定开发依赖，--check只读验证。图标归属与许可见THIRD-PARTY-NOTICES.md。
-
-## 发布状态
-
-16项审查决策落实不等于发布完成。当前dist和release ZIP未重新生成，源码更新与安装包发布分别管理。历史10/10安装日志仅证明当时产物；当前源码的真实COM、GUI、全新离线环境和卸载验证仍待执行。以发布验收矩阵逐项记录新产物证据，不把历史测试、源码构建或无界面模拟提升为系统集成通过。
