@@ -1,123 +1,71 @@
-# 7zipContext 图标生成器（纯标准库）：蓝色渐变圆角方块 + 白色拉链
-# 输出 assets/7zipContext.ico（PNG 内嵌 ICO）与 assets/7zipContext.png 预览
-import struct, zlib, math
+"""Export the existing artwork; never redraw or download an icon.
+
+Install: python -m pip install -r scripts/requirements-icons.txt
+Generate: python scripts/gen_icon.py
+Verify: python scripts/gen_icon.py --check
+"""
+import argparse
+import io
+import sys
 from pathlib import Path
 
-S = 512
-OUT = Path(__file__).resolve().parent.parent / "assets"
-OUT.mkdir(exist_ok=True)
+from PIL import Image, __version__ as pillow_version
 
-def clamp(v, a, b):
-    return a if v < a else (b if v > b else v)
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / "assets/icon-source.ico"
+PINNED_PILLOW = "12.1.1"
+SIZES = {(16, 16), (32, 32), (48, 48), (256, 256)}
 
-def rr_cov(x, y, x0, y0, x1, y1, r):
-    """圆角矩形覆盖率（0..1，边缘抗锯齿）"""
-    if x < x0 - 1 or x > x1 + 1 or y < y0 - 1 or y > y1 + 1:
-        return 0.0
-    cx = clamp(x, x0 + r, x1 - r)
-    cy = clamp(y, y0 + r, y1 - r)
-    d = math.hypot(x - cx, y - cy)
-    if d <= r - 0.5:
-        return 1.0
-    if d >= r + 0.5:
-        return 0.0
-    return r + 0.5 - d
 
-def over(dst, src, a):
-    return tuple(dst[i] * (1 - a) + src[i] * a for i in range(4))
+def outputs():
+    if pillow_version != PINNED_PILLOW:
+        raise ValueError(f"Pillow {PINNED_PILLOW} required; found {pillow_version}")
+    source_bytes = SOURCE.read_bytes()
+    with Image.open(io.BytesIO(source_bytes)) as ico:
+        if ico.format != "ICO" or ico.ico.sizes() != SIZES:
+            raise ValueError("Source ICO must contain exactly 16, 32, 48 and 256 pixel frames")
+        master = ico.ico.getimage((256, 256)).convert("RGBA")
+        if master.getbbox() is None:
+            raise ValueError("Source icon is empty")
+    result = {"assets/7zipContext.ico": source_bytes}
+    targets = {
+        "assets/7zipContext.png": 256,
+        "package/Square44x44Logo.png": 44,
+        "package/Square150x150Logo.png": 150,
+        "package/StoreLogo.png": 50,
+    }
+    for name, size in targets.items():
+        icon = master if size == 256 else master.resize((size, size), Image.Resampling.LANCZOS)
+        with io.BytesIO() as data:
+            icon.save(data, format="PNG", compress_level=9)
+            result[name] = data.getvalue()
+    return result
 
-WHITE = (255.0, 255.0, 255.0, 255.0)
 
-buf = []
-for y in range(S):
-    row = []
-    t = y / (S - 1)
-    # 蓝色竖向渐变：#4A90FF → #2563EB
-    bg = (74 + (37 - 74) * t, 144 + (99 - 144) * t, 255 + (235 - 255) * t, 255.0)
-    for x in range(S):
-        cov = rr_cov(x + 0.5, y + 0.5, 2, 2, S - 2, S - 2, 104)
-        if cov <= 0:
-            row.append((0.0, 0.0, 0.0, 0.0))
-            continue
-        c = (bg[0], bg[1], bg[2], 255.0 * cov)
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="Compare all exports without writing files")
+    args = parser.parse_args()
+    try:
+        generated = outputs()  # Validate all inputs before changing any output.
+        stale = [name for name, data in generated.items()
+                 if not (ROOT / name).is_file() or (ROOT / name).read_bytes() != data]
+        if args.check:
+            if stale:
+                print("Out-of-date icons: " + ", ".join(stale), file=sys.stderr)
+                return 1
+            print("Icon exports: 5/5 current")
+            return 0
+        for name in stale:
+            target = ROOT / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(generated[name])
+        print(f"Icon exports: 5/5 generated ({len(stale)} updated)")
+        return 0
+    except (OSError, ValueError) as error:
+        print(f"Icon generation failed: {error}", file=sys.stderr)
+        return 1
 
-        # 拉链齿：左右两列白色圆角块，交错咬合
-        for k in range(11):
-            yy = 84 + k * 32
-            a = rr_cov(x + 0.5, y + 0.5, 176, yy, 252, yy + 20, 8)
-            if a > 0:
-                c = over(c, WHITE, a)
-            a = rr_cov(x + 0.5, y + 0.5, 260, yy + 16, 336, yy + 36, 8)
-            if a > 0:
-                c = over(c, WHITE, a)
 
-        # 滑块 + 拉头
-        for (x0, y0, x1, y1, r) in [
-            (228, 226, 284, 282, 12),   # slider
-            (246, 282, 266, 336, 10),   # pull bar
-            (236, 330, 276, 370, 20),   # pull ring
-        ]:
-            a = rr_cov(x + 0.5, y + 0.5, x0, y0, x1, y1, r)
-            if a > 0:
-                c = over(c, WHITE, a)
-        # 拉环中间的孔（挖回蓝底近似：小圆角块用渐变色）
-        a = rr_cov(x + 0.5, y + 0.5, 248, 342, 264, 358, 8)
-        if a > 0:
-            c = over(c, bg, a)
-
-        row.append(c)
-    buf.append(row)
-
-def to_png(px, w, h):
-    raw = b"".join(
-        b"\x00" + b"".join(struct.pack("4B", *(
-            int(max(0, min(255, round(v)))) for v in px[y][x]
-        )) for x in range(w))
-        for y in range(h)
-    )
-    def chunk(t, d):
-        c = t + d
-        return struct.pack(">I", len(d)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
-    return (b"\x89PNG\r\n\x1a\n"
-            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(raw, 9))
-            + chunk(b"IEND", b""))
-
-png256 = to_png(buf, S, S)
-# 缩放到 48/32/16 供 ICO 多尺寸（盒式平均）
-def shrink(px, tw, th):
-    sw, sh = S, S
-    out = []
-    for ty in range(th):
-        row = []
-        for tx in range(tw):
-            x0, x1 = tx * sw // tw, max(tx * sw // tw + 1, (tx + 1) * sw // tw)
-            y0, y1 = ty * sh // th, max(ty * sh // th + 1, (ty + 1) * sh // th)
-            acc = [0.0] * 4
-            n = 0
-            for yy in range(y0, y1):
-                for xx in range(x0, x1):
-                    for i in range(4):
-                        acc[i] += px[yy][xx][i]
-                    n += 1
-            row.append(tuple(v / n for v in acc))
-        out.append(row)
-    return out
-
-sizes = [(256, shrink(buf, 256, 256)), (48, shrink(buf, 48, 48)), (32, shrink(buf, 32, 32)), (16, shrink(buf, 16, 16))]
-pngs = [(sz, to_png(p, sz, sz)) for sz, p in sizes]
-
-# ICO：每项内嵌 PNG
-entries = b""
-blobs = b""
-offset = 6 + 16 * len(pngs)
-for sz, data in pngs:
-    entries += struct.pack("<BBBBHHII", sz if sz < 256 else 0, sz if sz < 256 else 0,
-                           0, 0, 1, 32, len(data), offset)
-    blobs += data
-    offset += len(data)
-ico = struct.pack("<HHH", 0, 1, len(pngs)) + entries + blobs
-
-(OUT / "7zipContext.png").write_bytes(pngs[0][1])
-(OUT / "7zipContext.ico").write_bytes(ico)
-print("icon ok:", OUT / "7zipContext.ico", len(ico), "bytes")
+if __name__ == "__main__":
+    raise SystemExit(main())

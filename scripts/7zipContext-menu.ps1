@@ -16,7 +16,7 @@ $clsKey = "Software\Classes\CLSID\$clsid"
 # One handler, several shell targets: files, folders, folder background, desktop.
 # (Registering only on '*' made folders/desktop silently skip it, which looked like "load failed".)
 $handlerName = '7zipContext'
-# 历史键名（改名前的），必须用原字面量清理，不能被批量改名带跑
+# Historical registration names must remain literal for cleanup.
 $legacyNames = @('yayaPreview', 'yayaClassicSpike')
 $scopes = @(
     "*\shellex\ContextMenuHandlers\$handlerName",

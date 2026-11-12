@@ -5,15 +5,15 @@ namespace ZipContext.Classic;
 /// <summary>
 /// 预览显示设置，读取 dist\7zipContext.ini（与 7zipContext.exe 同目录，便携）。
 /// 按文件修改时间缓存：改完 ini 下一次右键就生效，不需要重启资源管理器。
-/// 文件缺失时用默认值，并尝试写一份带注释的默认文件（写不了就算了）。
+/// 文件缺失时只读默认值；配置仅由设置面板显式保存。
 /// </summary>
 internal sealed class PreviewSettings
 {
-    public int RootMax { get; private set; } = 20;
-    public int ChildrenPerFolder { get; private set; } = 3;
-    public bool ShowFilesInSubfolders { get; private set; }
-    public int MaxDepth { get; private set; } = 1;
-
+    private ZipContext.Core.SettingsDocument _settings = new();
+    public int RootMax => _settings.RootMax;
+    public int ChildrenPerFolder => _settings.ChildrenPerFolder;
+    public bool ShowFilesInSubfolders => _settings.ShowFilesInSubfolders;
+    public int MaxDepth => _settings.MaxDepth;
     private static PreviewSettings _cached = new();
     private static DateTime _cachedStamp = DateTime.MinValue;
     private static string? _path;
@@ -30,7 +30,8 @@ internal sealed class PreviewSettings
                 if (!File.Exists(p))
                 {
                     _cached = new PreviewSettings();
-                    TryWriteDefault(p);
+                    _cachedStamp = DateTime.MinValue;
+
                     return _cached;
                 }
 
@@ -63,78 +64,8 @@ internal sealed class PreviewSettings
 
     private static PreviewSettings Parse(string path)
     {
-        var s = new PreviewSettings();
-        var section = "";
-
-        foreach (var raw in File.ReadAllLines(path))
-        {
-            var line = raw.Trim();
-            if (line.Length == 0 || line.StartsWith(';') || line.StartsWith('#')) continue;
-
-            if (line.StartsWith('[') && line.EndsWith(']'))
-            {
-                section = line[1..^1].Trim();
-                continue;
-            }
-
-            var eq = line.IndexOf('=');
-            if (eq <= 0) continue;
-
-            var key = line[..eq].Trim();
-            var val = line[(eq + 1)..].Trim();
-            if (!section.Equals("preview", StringComparison.OrdinalIgnoreCase)) continue;
-
-            switch (key.ToLowerInvariant())
-            {
-                case "rootmax":
-                    if (int.TryParse(val, out var r) && r >= 0) s.RootMax = r;
-                    break;
-                case "childrenperfolder":
-                    if (int.TryParse(val, out var c) && c >= 0) s.ChildrenPerFolder = c;
-                    break;
-                case "showfilesinsubfolders":
-                    s.ShowFilesInSubfolders = val is "1" || val.Equals("true", StringComparison.OrdinalIgnoreCase);
-                    break;
-                case "maxdepth":
-                    if (int.TryParse(val, out var d) && d >= 0 && d <= 2) s.MaxDepth = d;
-                    break;
-            }
-        }
-        return s;
+        var s = ZipContext.Core.SettingsDocument.Load(path);
+        return new PreviewSettings { _settings=s };
     }
-
-    private static void TryWriteDefault(string path)
-    {
-        try
-        {
-            File.WriteAllText(path, DefaultIni, new System.Text.UTF8Encoding(true));
-        }
-        catch { /* 只读目录就静默跳过 */ }
-    }
-
-    public const string DefaultIni = """
-; 7zipContext 压缩文件预览 —— 右键菜单里显示压缩包结构的规则
-; 改完保存即可，下一次右键生效（不需要重启资源管理器）。
-;
-; rootMax             根目录最多显示几项；0 = 不限制
-; childrenPerFolder   每个子文件夹展开几个子文件夹；0 = 不展开子层
-; showFilesInSubfolders  子层是否也显示文件（0/1）
-; maxDepth            往下展开几层（0 = 只看根，1 = 到第二层，2 = 到第三层）
-
-[preview]
-rootMax=20
-childrenPerFolder=3
-showFilesInSubfolders=0
-maxDepth=1
-
-; 压缩包识别规则：遇到奇怪分卷名只改这里，不用改程序
-; splitFirstSuffixes   分卷首卷后缀，逗号分隔；例如 .001,.z01,.part1.rar
-; splitLaterSuffixes   分卷后续后缀，逗号分隔；例如 .002,.z02,.part2.rar
-; openWithSevenZip     是否对所有文件/文件夹显示「用 7-Zip 打开」（0/1）
-
-[archive]
-splitFirstSuffixes=.001,.z01
-splitLaterSuffixes=.002,.z02
-openWithSevenZip=1
-""";
+    public const string DefaultIni = ZipContext.Core.SettingsDocument.DefaultIni;
 }

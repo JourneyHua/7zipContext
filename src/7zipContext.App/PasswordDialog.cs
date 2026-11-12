@@ -8,7 +8,6 @@ namespace ZipContext.App;
 public class PasswordDialog : Window
 {
     private readonly PasswordBox _box;
-    private readonly CheckBox _remember;
 
     public string? Password { get; private set; }
 
@@ -16,12 +15,11 @@ public class PasswordDialog : Window
     {
         Title = "7zipContext - 输入密码";
         Width = 380;
-        Height = 210;
+        Height = 180;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         ResizeMode = ResizeMode.NoResize;
 
         var grid = new Grid { Margin = new Thickness(16) };
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -39,15 +37,6 @@ public class PasswordDialog : Window
         Grid.SetRow(_box, 1);
         grid.Children.Add(_box);
 
-        _remember = new CheckBox
-        {
-            Content = "本次会话内记住密码",
-            IsChecked = true,
-            Margin = new Thickness(0, 0, 0, 8),
-        };
-        Grid.SetRow(_remember, 2);
-        grid.Children.Add(_remember);
-
         var buttons = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -58,7 +47,7 @@ public class PasswordDialog : Window
         var cancel = new Button { Content = "取消", Width = 80, IsCancel = true };
         buttons.Children.Add(ok);
         buttons.Children.Add(cancel);
-        Grid.SetRow(buttons, 3);
+        Grid.SetRow(buttons, 2);
         grid.Children.Add(buttons);
 
         Content = grid;

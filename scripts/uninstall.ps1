@@ -25,6 +25,14 @@ $pkgName = '7zipContext.ContextMenu'
 function Say([string]$msg, [string]$color = 'Gray') { Write-Host $msg -ForegroundColor $color }
 function Step([int]$n, [string]$msg) { Write-Host "[$n/3] $msg" -ForegroundColor Cyan }
 
+try {
+    . (Join-Path $PSScriptRoot 'deployment.ps1')
+    $deploymentContext = Enter-DeploymentLease
+} catch {
+    [Console]::Error.WriteLine("无法取得部署锁：$_")
+    exit 1
+}
+try {
 # ---- 0. 停掉常驻进程（COM 服务器/主程序，否则文件与注册清理可能被挡） ----
 Get-Process -Name '7zipContext.Shell', '7zipContext' -ErrorAction SilentlyContinue | ForEach-Object {
     try { $_.Kill(); Say "  已停止 $($_.ProcessName) ($($_.Id))" 'DarkGray' } catch { }
@@ -41,10 +49,14 @@ if ($pkg) {
     Say '  未发现注册，跳过' 'DarkGray'
 }
 
+Get-AppxPackage -Name 'yaya.ContextMenu' -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue
+
 # ---- 2. 注册表清理（独立清单，全量） ----
 Step 2 '清理注册表（动词 / 预览窗格 / 经典菜单 handler / 文件关联）...'
 $removed = 0
+$cleanupKeys = [System.Collections.Generic.List[string]]::new()
 function Remove-RegKey([string]$path) {
+    $script:cleanupKeys.Add($path)
     if (Test-Path -LiteralPath $path) {
         Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
         $script:removed++
@@ -79,20 +91,32 @@ foreach ($s in '*', 'Directory', 'Directory\Background', 'DesktopBackground') {
     }
 }
 # 改名前的 ProgId（yaya.zip / yaya.7z …）同样要清
-foreach ($ext in '.zip', '.7z', '.tar', '.tgz', '.gz', '.bz2', '.xz') {
+foreach ($ext in '.zip', '.7z', '.rar', '.tar', '.tgz', '.gz', '.bz2', '.xz') {
     Remove-RegKey "HKCU:\Software\Classes\yaya$ext"
 }
 
 # 2c. 文件关联（ProgId + OpenWithProgids）
-foreach ($ext in '.zip', '.7z', '.tar', '.tgz', '.gz', '.bz2', '.xz') {
+foreach ($ext in '.zip', '.7z', '.rar', '.tar', '.tgz', '.gz', '.bz2', '.xz') {
     Remove-RegKey "HKCU:\Software\Classes\7zipContext$ext"
+    # 只清掉指向本项目的默认值，不能留下指向已删除 ProgId 的悬空关联。
+    $extensionKey = "HKCU:\Software\Classes\$ext"
+    if (Test-Path -LiteralPath $extensionKey) {
+        $extension = Get-Item -LiteralPath $extensionKey
+        if ($extension.GetValue('') -in @("7zipContext$ext", "yaya$ext")) {
+            $extension.DeleteValue('', $false)
+        }
+        $extension.Close()
+    }
     $owp = "HKCU:\Software\Classes\$ext\OpenWithProgids"
     if (Test-Path -LiteralPath $owp) {
         $v = Get-Item -LiteralPath $owp
-        if ($v.GetValueNames() -contains "7zipContext$ext") {
-            Remove-ItemProperty -LiteralPath $owp -Name "7zipContext$ext" -Force -ErrorAction SilentlyContinue
-            $removed++
+        foreach ($id in @("7zipContext$ext", "yaya$ext")) {
+            if ($v.GetValueNames() -contains $id) {
+                Remove-ItemProperty -LiteralPath $owp -Name $id -Force -ErrorAction SilentlyContinue
+                $removed++
+            }
         }
+        $v.Close()
     }
 }
 
@@ -104,6 +128,9 @@ Say "  已清理 $removed 处注册表项" 'Green'
 # ---- 3. 自检残留 ----
 Step 3 '卸载自检 ...'
 $left = 0
+foreach ($path in $cleanupKeys) {
+    if (Test-Path -LiteralPath $path) { $left++ }
+}
 if (Get-AppxPackage -Name $pkgName -ErrorAction SilentlyContinue) { $left++ }
 foreach ($ext in '.zip', '.7z', '.rar', '.tar', '.gz', '.cab', '.iso') {
     foreach ($v in 'SmartExtract', 'SmartExtractDelete', 'ExtractToName', 'ExtractToFolder', 'Preview') {
@@ -111,10 +138,30 @@ foreach ($ext in '.zip', '.7z', '.rar', '.tar', '.gz', '.cab', '.iso') {
     }
 }
 if (Test-Path 'HKCU:\Software\Classes\CLSID\{B9A10010-8C3F-4A2E-9E6D-5F1A2B3C4D10}') { $left++ }
-foreach ($ext in '.zip', '.7z', '.tar', '.tgz', '.gz', '.bz2', '.xz') {
+foreach ($ext in '.zip', '.7z', '.rar', '.tar', '.tgz', '.gz', '.bz2', '.xz') {
     if (Test-Path "HKCU:\Software\Classes\7zipContext$ext") { $left++ }
 }
 if (Test-Path 'HKCU:\Software\7zipContext') { $left++ }
+if (Get-AppxPackage -Name 'yaya.ContextMenu' -ErrorAction SilentlyContinue) { $left++ }
+if (Test-Path -LiteralPath 'HKCU:\Software\Classes\CLSID\{B9A10020-8C3F-4A2E-9E6D-5F1A2B3C4D20}') { $left++ }
+foreach ($scope in '*', 'Directory', 'Directory\Background', 'DesktopBackground') {
+    foreach ($name in '7zipContext', 'yayaPreview', 'yayaClassicSpike') {
+        if (Test-Path -LiteralPath "HKCU:\Software\Classes\$scope\shellex\ContextMenuHandlers\$name") { $left++ }
+    }
+}
+foreach ($ext in '.zip', '.7z', '.rar', '.tar', '.tgz', '.gz', '.bz2', '.xz') {
+    if (Test-Path -LiteralPath "HKCU:\Software\Classes\yaya$ext") { $left++ }
+    $key = Get-Item -LiteralPath "HKCU:\Software\Classes\$ext" -ErrorAction SilentlyContinue
+    if ($key) {
+        if ($key.GetValue('') -in @("7zipContext$ext", "yaya$ext")) { $left++ }
+        $key.Close()
+    }
+    $key = Get-Item -LiteralPath "HKCU:\Software\Classes\$ext\OpenWithProgids" -ErrorAction SilentlyContinue
+    if ($key) {
+        if (@($key.GetValueNames() | Where-Object { $_ -in @("7zipContext$ext", "yaya$ext") }).Count -gt 0) { $left++ }
+        $key.Close()
+    }
+}
 
 if ($left -eq 0) {
     Say '  [OK] 0 残留' 'Green'
@@ -122,40 +169,27 @@ if ($left -eq 0) {
     Say "  [X] 仍有 $left 处残留（重启后重跑本脚本，或重启 explorer 后再查）" 'Yellow'
 }
 
-# ---- 收尾 ----
-if ($Purge) {
-    if (Test-Path $dist) {
-        Remove-Item -LiteralPath $dist -Recurse -Force -ErrorAction SilentlyContinue
-        Say "  已删除 dist\" 'Green'
-    }
+# ---- 文件清理：失败计入最终退出码 ----
+$purgeFailures = [Collections.Generic.List[string]]::new()
+if ($left -gt 0 -and ($Purge -or $PurgeEngine)) { $purgeFailures.Add('注册仍有残留，已保留程序与引擎文件供重试。') }
+if ($Purge -and $left -eq 0) {
+    try { Remove-VerifiedPurgePath $dist $root; Say '  dist 已删除或不存在' 'Green' }
+    catch { $purgeFailures.Add("dist：$_") }
 }
-
-# 7-Zip 引擎默认保留（用户可能还在用；本机已有的引擎永远不动）。
-# 只有显式 -PurgeEngine 才清掉「我们自己下载解包」的版本目录与指针文件。
-if ($PurgeEngine) {
-    $engineRoot = Join-Path $env:LOCALAPPDATA '7zipContext'
-    $engineMeta = Join-Path $engineRoot 'engine.json'
-    $engineDirs = Join-Path $engineRoot 'engine'
-    $isDownloaded = $false
-    if (Test-Path -LiteralPath $engineMeta) {
-        try {
-            $meta = Get-Content -LiteralPath $engineMeta -Raw -Encoding UTF8 | ConvertFrom-Json
-            $isDownloaded = ($meta.origin -eq 'downloaded')
-        } catch { }
-    }
-    if ($isDownloaded -and (Test-Path -LiteralPath $engineDirs)) {
-        Remove-Item -LiteralPath $engineDirs -Recurse -Force -ErrorAction SilentlyContinue
-        foreach ($f in 'engine.path', 'engine.json', 'last-ensure.json',
-                      'last-update-check', 'last-update-result.json') {
-            $p = Join-Path $engineRoot $f
-            if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
-        }
-        Say '  已删除下载的 7-Zip 引擎缓存' 'Green'
-    } else {
-        Say '  引擎为本机已有，未做任何删除（只清本工具下载的版本）' 'DarkGray'
-    }
+if ($PurgeEngine -and $left -eq 0) {
+    $engineRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) '7zipContext'
+    $engineGate = $null
+    try {
+        [void][IO.Directory]::CreateDirectory($engineRoot)
+        $engineGate = [IO.File]::Open((Join-Path $engineRoot 'engine.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        $cleanup = Remove-DownloadedEngineCache $engineRoot
+        foreach ($failure in $cleanup.Failures) { $purgeFailures.Add($failure) }
+        Say "  下载引擎目录已删除 $($cleanup.Deleted.Count) 个，本机或来源未知目录保留 $($cleanup.Preserved.Count) 个" 'Gray'
+        foreach ($preserved in $cleanup.Preserved) { Say "  已保留：$preserved" 'DarkGray' }
+    } catch { $purgeFailures.Add("引擎清理失败或无法取得锁：$_") }
+    finally { if ($engineGate) { $engineGate.Dispose() } }
 }
-
+foreach ($failure in $purgeFailures) { Say "  [X] $failure" 'Yellow' }
 $signature = @'
 [DllImport("shell32.dll")] public static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
 '@
@@ -170,6 +204,8 @@ if ($RestartExplorer) {
 }
 
 Say ''
-Say "卸载完成。$(if ($Purge) { '' } else { '（dist\ 已保留；加 -Purge 可一并删除）'})" 'Green'
+if ($left -gt 0 -or $purgeFailures.Count -gt 0) { Say '卸载尚未完成，请处理上述注册残留或文件删除错误后重试。' 'Yellow' } else { Say '卸载完成。' 'Green' }
 if (-not $PurgeEngine) { Say '  （7-Zip 引擎已保留；加 -PurgeEngine 可删除本工具下载的引擎）' 'Gray' }
-exit $(if ($left -eq 0) { 0 } else { 1 })
+exit $(if ($left -eq 0 -and $purgeFailures.Count -eq 0) { 0 } else { 1 })
+
+} finally { Exit-DeploymentLease $deploymentContext }

@@ -172,7 +172,7 @@ Console.WriteLine("\n[7] 分卷文件识别与菜单去重");
     Check("单选 .002 不显示解压", !ArchiveSelection.CanExtract(new[] { later }));
 
     var targets = ArchiveSelection.TargetsForExtraction(new[] { first, later, normal });
-    Check("执行只保留首卷", targets.Count == 1 &&
+    Check("该选择仅有首卷可执行", targets.Count == 1 &&
         string.Equals(targets[0], first, StringComparison.OrdinalIgnoreCase));
 
     Check("分卷菜单命名去掉 .001 和 .7z",
@@ -189,7 +189,7 @@ Console.WriteLine("\n[8] 分卷规则可配置");
         ArchiveRules.Current.SplitFirstSuffixes.Contains(".001") &&
         ArchiveRules.Current.SplitFirstSuffixes.Contains(".z01"));
     Check("默认开启「用 7-Zip 打开」", ArchiveRules.Current.OpenWithSevenZip);
-    Check(".z01 识别为首卷", ArchiveFormats.IsFirstSplitVolume("weird.z01"));
+    Check("缺少末尾 ZIP 的 .z01 不作为解压入口", !ArchiveFormats.IsFirstSplitVolume("weird.z01"));
 
     var first = Path.Combine(work, "weird.part1.rar");
     var later = Path.Combine(work, "weird.part2.rar");
@@ -203,6 +203,156 @@ Console.WriteLine("\n[8] 分卷规则可配置");
         group.Any(p => string.Equals(p, later, StringComparison.OrdinalIgnoreCase)));
     Check("自定义分卷命名去掉分卷后缀",
         SplitVolumeNames.StripSplitSuffix(first, firstSet).EndsWith("weird", StringComparison.OrdinalIgnoreCase));
+}
+
+Console.WriteLine("\n[9] 分卷删除范围与保留源文件");
+{
+    var firstSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".001", ".z01", ".part1.rar", ".custom" };
+    var laterSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".002", ".z02", ".part2.rar", ".later" };
+    string Fixture(string dir, string name)
+    {
+        var path = Path.Combine(work, dir, name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, name);
+        return path;
+    }
+    SplitVolumeNames.DeletionPlan Deletion(string path) => SplitVolumeNames.PlanDeletion(path, firstSet, laterSet);
+
+    var numeric = Fixture("families", "照片.001");
+    Fixture("families", "照片.002");
+    var unrelatedZip = Fixture("families", "照片.z02");
+    var unrelatedRar = Fixture("families", "照片.part2.rar");
+    var numbered = Deletion(numeric);
+    Check("数字卷不会混入同名 ZIP/RAR 家族", numbered.CanDelete && numbered.Files.Count == 2 &&
+        !numbered.Files.Contains(unrelatedZip) && !numbered.Files.Contains(unrelatedRar));
+    var rar = Fixture("families", "照片.part1.rar");
+    var rarPlan = Deletion(rar);
+    Check("RAR 家族不会混入同名数字卷", rarPlan.CanDelete && rarPlan.Files.Count == 2 && !rarPlan.Files.Contains(numeric));
+
+    var large = Fixture("large-group", "many.001");
+    for (var i = 2; i <= 1002; i++) Fixture("large-group", $"many.{i:000}");
+    var largePlan = Deletion(large);
+    Check("超过 999 卷不会截断", largePlan.CanDelete && largePlan.Files.Count == 1002);
+    File.Delete(Path.Combine(Path.GetDirectoryName(large)!, "many.500"));
+    var gap = Deletion(large);
+    Check("编号空缺拒绝删除且不漏掉后段", !gap.CanDelete && gap.Files.Count == 1001 &&
+        gap.Files.Any(p => p.EndsWith(".1002")));
+
+    var ambiguous = Fixture("padding", "same.001");
+    Fixture("padding", "same.002");
+    Fixture("padding", "same.02");
+    Check("同编号不同补零方式保留", !Deletion(ambiguous).CanDelete);
+    var zipFirst = Fixture("traditional-zip", "bundle.z01");
+    Fixture("traditional-zip", "bundle.z02");
+    var zipLast = Fixture("traditional-zip", "bundle.zip");
+    Check("传统分卷 ZIP 首卷保留", !Deletion(zipFirst).CanDelete);
+    Check("传统分卷 ZIP 末尾包也保留", !Deletion(zipLast).CanDelete);
+    var custom = Fixture("custom-group", "bundle.custom");
+    Fixture("custom-group", "bundle.later");
+    Check("未知非数字分卷保留且不猜测配对", !Deletion(custom).CanDelete && Deletion(custom).Files.Count == 1);
+    var customNumeric = Fixture("custom-numbered", "bundle.chunk1.bin");
+    Fixture("custom-numbered", "bundle.chunk2.bin");
+    Check("未知数字家族可枚举但不删除", !SplitVolumeNames.PlanDeletion(customNumeric,
+        new(StringComparer.OrdinalIgnoreCase) { ".chunk1.bin" }, laterSet).CanDelete);
+    var laterRar = Fixture("unconfigured", "bundle.part2.rar");
+    Check("未配置的常见后续 RAR 卷也拒绝删除", !Deletion(laterRar).CanDelete);
+    var paddedRar = Fixture("padded-rar", "bundle.part0001.rar");
+    Fixture("padded-rar", "bundle.part0002.rar");
+    Check("常见 RAR 补零家族保护不依赖配置", Deletion(paddedRar).CanDelete && Deletion(paddedRar).Files.Count == 2);
+
+    // 独立 ZIP 旁有同名 .z01：引擎可解压，但命名无法确认是否为同一组，必须保留。
+    var disguised = Path.Combine(work, "preserved.zip");
+    File.Copy(Path.Combine(work, "single-file.zip"), disguised);
+    var uncertainSibling = Fixture(".", "preserved.z01");
+    var preserved = await smart.ExtractAsync(disguised, deleteAfter: true);
+    Check("成功解压但不可靠分卷保留并告警", preserved.Success && !preserved.ArchiveDeleted &&
+        preserved.Error?.Contains("保留") == true && File.Exists(disguised) && File.Exists(uncertainSibling));
+
+    // 用真实引擎生成数字分卷，验证成功才删整组且同名其他格式仍在。
+    var realDir = Path.Combine(work, "real-volumes");
+    Directory.CreateDirectory(realDir);
+    await File.WriteAllBytesAsync(Path.Combine(realDir, "payload.bin"),
+        System.Security.Cryptography.RandomNumberGenerator.GetBytes(8192));
+    var split = Path.Combine(realDir, "real.7z");
+    var psi = new System.Diagnostics.ProcessStartInfo(EngineLocator.Require("7z.exe"))
+        { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+    foreach (var arg in new[] { "a", "-t7z", "-mx=0", "-v1k", split, Path.Combine(realDir, "payload.bin") })
+        psi.ArgumentList.Add(arg);
+    using var proc = System.Diagnostics.Process.Start(psi)!;
+    await Task.WhenAll(proc.StandardOutput.ReadToEndAsync(), proc.StandardError.ReadToEndAsync(), proc.WaitForExitAsync());
+    Check("真实数字分卷夹具创建成功", proc.ExitCode == 0 && File.Exists(split + ".002"));
+    Check("普通 ZIP 不伪造分卷数量", await svc.ReadVolumeCountAsync(Path.Combine(work, "single-file.zip")) is null);
+    Check("引擎报告实际数字分卷数量", await svc.ReadVolumeCountAsync(split + ".001") ==
+        Deletion(split + ".001").Files.Count);
+    var foreign = Fixture("real-volumes", "real.7z.z02");
+    var realResult = await smart.ExtractAsync(split + ".001", deleteAfter: true);
+    Check("真实分卷成功后删除完整数字组", realResult.Success && realResult.ArchiveDeleted &&
+        !Directory.EnumerateFiles(realDir).Any(p => System.Text.RegularExpressions.Regex.IsMatch(p, @"\.7z\.[0-9]+$")));
+    Check("真实解压删除不影响其他家族", File.Exists(foreign));
+}
+
+Console.WriteLine("\n[10] 真实传统分卷 ZIP 入口");
+{
+    var split = TraditionalZipFixture.Create(Path.Combine(work, "traditional-real"), "照片.v1");
+    var entries = await svc.ListAsync(split.Last);
+    Check("传统 ZIP 末尾入口列出两卷内容", entries.Count == 2 &&
+        TraditionalZipFixture.Contents.Keys.All(name => entries.Any(e => e.Path == name)));
+    var dest = Path.Combine(work, "traditional-extracted");
+    var extracted = await svc.ExtractAsync(split.Last, dest);
+    Check("传统 ZIP 从末尾入口真实解压且内容一致", extracted.Success &&
+        TraditionalZipFixture.Contents.All(p => File.Exists(Path.Combine(dest, p.Key)) &&
+            File.ReadAllText(Path.Combine(dest, p.Key)) == p.Value));
+    var firstReadable = false;
+    try { var firstEntries = await svc.ListAsync(split.First); firstReadable = firstEntries.Count == 2; }
+    catch (SevenZipException) { }
+    Console.WriteLine($"  INFO  engine can list complete contents via .z01: {firstReadable}");
+    Check("完整 .z01 被规范为末尾 ZIP", ArchiveFormats.ExtractionEntry(split.First) == split.Last);
+    Check("单选末尾 ZIP 可显示解压", ArchiveSelection.CanExtract(new[] { split.Last }));
+    Check("单选完整 .z01 可显示解压", ArchiveSelection.CanExtract(new[] { split.First }));
+    Check("后续 .z02 不单独显示解压", !ArchiveFormats.IsArchive(split.Middle) &&
+        !ArchiveSelection.CanExtract(new[] { split.Middle }));
+    var targets = ArchiveSelection.TargetsForExtraction(new[] { split.First, split.Middle, split.Last, split.First });
+    Check("整组多选只执行末尾 ZIP 一次", targets.Count == 1 && targets[0] == split.Last &&
+        ArchiveSelection.CanExtract(new[] { split.First, split.Middle, split.Last }));
+    Check("末尾 ZIP 与后续卷混选也只执行一次", ArchiveSelection.TargetsForExtraction(new[] { split.Last, split.Middle })
+        .SequenceEqual(new[] { split.Last }) && ArchiveSelection.CanExtract(new[] { split.Last, split.Middle }));
+    Check("传统 ZIP 名称保留中间点号", NamingHelper.TargetBaseName(targets) == "照片.v1");
+    var preserved = await smart.ExtractAsync(targets[0], deleteAfter: true);
+    Check("真实传统 ZIP 解压成功但保留全部卷", preserved.Success && !preserved.ArchiveDeleted &&
+        preserved.Error?.Contains("保留") == true && File.Exists(split.First) && File.Exists(split.Middle) && File.Exists(split.Last));
+
+    var lastBytes = File.ReadAllBytes(split.Last);
+    File.Delete(split.Last);
+    Check("缺少末尾 ZIP 隐藏解压入口", !ArchiveFormats.IsArchive(split.First) &&
+        !ArchiveSelection.CanExtract(new[] { split.First, split.Middle }) &&
+        ArchiveSelection.TargetsForExtraction(new[] { split.First, split.Middle }).Count == 0);
+    File.WriteAllBytes(split.Last, lastBytes);
+    var middleBytes = File.ReadAllBytes(split.Middle);
+    File.Delete(split.Middle);
+    var incomplete = await svc.TestAsync(split.Last);
+    Check("真实 ZIP 缺少中间卷完整性检查失败", !incomplete.Success && File.Exists(split.First) && File.Exists(split.Last));
+    File.WriteAllBytes(split.Middle, middleBytes);
+
+    var ini = ArchiveRules.IniPath!;
+    var original = File.Exists(ini) ? File.ReadAllBytes(ini) : null;
+    try
+    {
+        File.WriteAllText(ini, "[archive]\nsplitFirstSuffixes=.001,.z01,.part1.rar,.chunk1.bin\nsplitLaterSuffixes=.002,.z02,.part2.rar,.chunk2.bin\n");
+        File.SetLastWriteTimeUtc(ini, DateTime.UtcNow.AddSeconds(1));
+        Check("未知配置分卷不猜测解压入口", !ArchiveFormats.IsArchive("unknown.chunk1.bin") &&
+            !ArchiveSelection.CanExtract(new[] { "unknown.chunk1.bin" }) &&
+            ArchiveSelection.TargetsForExtraction(new[] { "unknown.chunk1.bin" }).Count == 0);
+        Check("已配置 RAR 首卷仍支持", ArchiveFormats.IsArchive("known.part1.rar"));
+        Check("RAR 后续卷按家族排除", !ArchiveFormats.IsArchive("known.part3.rar") &&
+            !ArchiveFormats.IsArchive("known.part999.rar"));
+        Check("传统卷识别忽略大小写", ArchiveFormats.IsTraditionalZipSegment("demo.Z02") &&
+            !ArchiveFormats.IsArchive("demo.Z02"));
+    }
+    finally
+    {
+        if (original is null) File.Delete(ini);
+        else { File.WriteAllBytes(ini, original); File.SetLastWriteTimeUtc(ini, DateTime.UtcNow.AddSeconds(2)); }
+    }
 }
 
 Console.WriteLine($"\n========== 结果: {passed} 通过 / {failed} 失败 ==========");

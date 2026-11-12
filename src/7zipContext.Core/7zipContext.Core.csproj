@@ -8,4 +8,7 @@
     <AssemblyName>ZipContext.Core</AssemblyName>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Include="..\..\scripts\DeploymentFiles.cs" Link="DeploymentFiles.cs" />
+  </ItemGroup>
 </Project>

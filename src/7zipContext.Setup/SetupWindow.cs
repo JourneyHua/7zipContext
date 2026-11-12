@@ -2,9 +2,11 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using ZipContext.Deployment;
 
 namespace ZipContext.Setup;
 
@@ -27,6 +29,12 @@ public sealed class SetupWindow : Window
     private readonly Button _uninstall = new() { Content = "卸载", Width = 88, Height = 32 };
     private readonly Button _openSettings = new() { Content = "打开设置", Width = 96, Height = 32 };
     private readonly CheckBox _removeFiles = new() { Content = "卸载时删除程序文件", IsChecked = true };
+    private readonly CheckBox _setAsDefault = new()
+    {
+        Content = "设为默认打开方式（安装后打开系统设置，由你选择 .zip / .7z / .rar）",
+        IsChecked = false,
+        Margin = new Thickness(0, 0, 0, 8),
+    };
     private readonly CheckBox _removeEngine = new() { Content = "同时删除本工具下载的 7-Zip 引擎（本机已有的不会删除）" };
     private readonly TextBlock _status = new() { TextWrapping = TextWrapping.Wrap, Foreground = Brushes.DimGray };
     private readonly TextBox _log = new()
@@ -45,6 +53,9 @@ public sealed class SetupWindow : Window
 
     private bool _busy;
     private bool _explorerStopped;
+    private string? _deploymentToken;
+    private static readonly string DeploymentRoot = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "7zipContext", "deployments");
 
     public SetupWindow()
     {
@@ -109,6 +120,7 @@ public sealed class SetupWindow : Window
         buttons.Children.Add(Space());
         buttons.Children.Add(_openSettings);
         panel.Children.Add(buttons);
+        panel.Children.Add(_setAsDefault);
 
         var options = new WrapPanel();
         options.Children.Add(_removeFiles);
@@ -141,13 +153,20 @@ public sealed class SetupWindow : Window
         SetBusy(true);
         _log.Clear();
         SetStatus(install ? "正在安装，请稍候……" : "正在卸载，请稍候……");
+        var completed = false;
+        DeploymentLease? lease = null;
         try
         {
+            lease = await Task.Run(() => DeploymentLease.Acquire(Path.GetDirectoryName(InstallRoot)!,
+                null));
+            _deploymentToken = lease.Token;
             if (install) await Install();
             else await Uninstall();
+            completed = true;
         }
         catch (Exception ex)
         {
+            await Task.Run(RestartExplorerIfNeeded);
             AppendLog("[失败] " + ex.Message);
             SetStatus(ex.Message, error: true);
             MessageBox.Show(ex.Message, install ? "安装未完成" : "卸载未完成",
@@ -155,25 +174,96 @@ public sealed class SetupWindow : Window
         }
         finally
         {
-            RestartExplorerIfNeeded();
+            await Task.Run(RestartExplorerIfNeeded);
+            _deploymentToken = null;
+            lease?.Dispose();
             RefreshSettingsButton();
             SetBusy(false);
+        }
+        if (completed && install && _setAsDefault.IsChecked == true)
+        {
+            AppendLog("请在系统「默认应用」中搜索 .zip、.7z、.rar，逐项选择 7-Zip 文件管理器。未选择的类型保留现有默认程序。");
+            try { Process.Start(new ProcessStartInfo("ms-settings:defaultapps") { UseShellExecute = true }); }
+            catch (Exception ex)
+            {
+                AppendLog("无法打开系统设置：" + ex.Message);
+                SetStatus("安装已完成。请手动打开 Windows 设置 → 应用 → 默认应用，选择 7-Zip。");
+            }
         }
     }
 
     private async Task Install()
     {
-        ValidatePayload();
-        AppendLog("准备程序文件……");
-        StopShellProcesses();
-        CopyPayload();
-        AppendLog("程序文件已复制到：" + InstallRoot);
+        await RecoverInterruptedInstallations();
+        var stage = Path.Combine(DeploymentRoot, "install-" + Guid.NewGuid().ToString("N"));
+        var candidate = Path.Combine(stage, "candidate");
+        FileDeployment? transaction = null;
+        var registrationAttempted = false;
+        try
+        {
+            AppendLog("后台准备程序文件与备份……");
+            transaction = await Task.Run(() =>
+            {
+                ValidatePayload();
+                CopyPayload(candidate);
+                return FileDeployment.Prepare(candidate, InstallRoot, Path.Combine(stage, "transaction"),
+                    new[] { Path.Combine("dist", "7zipContext.ini") }, false);
+            });
+            // 使用候选程序先准备引擎，网络等待不占用资源管理器停机时间。
+            var ready = Path.Combine(stage, "engine-result.json");
+            var engineExit = await RunExecutable(Path.Combine(candidate, "dist", "7zipContext.exe"),
+                "--ensure-engine", "--status-path", ready);
+            var engineResult = await Task.Run(() =>
+            {
+                if (!File.Exists(ready)) return (Ok: false, Message: $"引擎退出码 {engineExit}，未生成请求结果文件。");
+                using var result = JsonDocument.Parse(File.ReadAllText(ready));
+                // 引擎已就绪但关联刷新有警告时，继续后续正式注册和自检。
+                var ok = engineExit is 0 or 4 && result.RootElement.TryGetProperty("ok", out var success) && success.GetBoolean();
+                var message = result.RootElement.TryGetProperty("message", out var text) ? text.GetString() ?? "无详细结果" : "无详细结果";
+                return (Ok: ok, Message: message);
+            });
+            AppendLog(engineResult.Message);
+            if (!engineResult.Ok) throw new IOException("引擎准备未完成，程序文件尚未切换：" + engineResult.Message);
+            await Task.Run(StopShellProcesses);
+            await Task.Run(transaction.Apply);
+            var script = Path.Combine(InstallRoot, "scripts", "install.ps1");
+            registrationAttempted = true;
+            var exitCode = await RunScript(script, "-SkipPublish", "-SkipEngineCheck");
+            if (exitCode != 0) throw new IOException($"安装自检未通过（退出码 {exitCode}）。");
+            var warning = await Task.Run(transaction.Commit);
+            if (warning is not null) AppendLog(warning);
+            else await TryCleanupStage(stage);
+        }
+        catch (Exception ex)
+        {
+            if (transaction is null) { await TryCleanupStage(stage); throw; }
+            if (transaction.Journal.State == "committed") throw;
+            try
+            {
+                await Task.Run(transaction.Rollback);
+                AppendLog("文件已恢复到安装前状态。");
+                if (registrationAttempted)
+                {
+                    // 旧版 --install 可能清除 UserChoice；不能为恢复注册重放该行为。
+                    AppendLog("系统注册可能存在部分变化，尚未验证恢复；请用新版安装工具修复。备份保留在：" + stage);
+                }
+                else
+                {
+                    AppendLog("系统注册尚未执行，无需恢复注册。");
+                    await Task.Run(transaction.Cleanup);
+                    await TryCleanupStage(stage);
+                }
+            }
+            catch (Exception recovery)
+            {
+                throw new IOException($"{ex.Message}\n恢复未全部完成：{recovery.Message}\n备份保留在：{stage}",
+                    new AggregateException(ex, recovery));
+            }
+            throw new IOException(ex.Message + "\n文件已恢复；安装未完成。" +
+                (registrationAttempted ? "\n系统注册尚需验证；备份保留在：" + stage : ""), ex);
+        }
 
-        var script = Path.Combine(InstallRoot, "scripts", "install.ps1");
-        var exitCode = await RunScript(script, "-SkipPublish");
-        if (exitCode != 0)
-            throw new InvalidOperationException($"安装自检未全部通过（退出码 {exitCode}）。请查看窗口中的日志。");
-
+        await Task.Run(RestartExplorerIfNeeded);
         SetStatus("安装完成。右键文件或文件夹即可使用 7zipContext。", success: true);
         AppendLog("安装完成。可以删除下载的 ZIP 和安装工具，不影响已安装程序。");
         MessageBox.Show("安装完成！\n\n右键文件或文件夹即可使用 7zipContext。\n开始菜单中的 7zipContext 可打开设置面板。",
@@ -183,12 +273,12 @@ public sealed class SetupWindow : Window
     private async Task Uninstall()
     {
         AppendLog("清理菜单注册与文件关联……");
-        StopShellProcesses();
 
         var installedScript = Path.Combine(InstallRoot, "scripts", "uninstall.ps1");
         var fallbackScript = Path.Combine(PayloadRoot, "scripts", "uninstall.ps1");
         var script = File.Exists(installedScript) ? installedScript : fallbackScript;
         if (!File.Exists(script)) throw new FileNotFoundException("找不到卸载脚本，安装包可能不完整。", script);
+        await Task.Run(StopShellProcesses);
 
         var args = new List<string>();
         // 备用脚本位于安装包内，绝不能随 -Purge 删除安装包自身。
@@ -197,26 +287,31 @@ public sealed class SetupWindow : Window
 
         var exitCode = await RunScript(script, args.ToArray());
         if (exitCode != 0)
-            throw new InvalidOperationException($"卸载后仍检测到残留（退出码 {exitCode}）。请重启电脑后重试。");
+            throw new InvalidOperationException($"卸载未完成（退出码 {exitCode}）。请查看日志中的注册残留或文件清理错误，处理后重试。");
 
-        if (_removeFiles.IsChecked == true && Directory.Exists(InstallRoot))
+        var removeFiles = _removeFiles.IsChecked == true;
+        await Task.Run(() =>
         {
-            if (SamePath(BundleRoot, InstallRoot))
+            if (removeFiles && Directory.Exists(InstallRoot))
             {
-                // Windows 不能删除正在运行的卸载工具自身；其余目录可以全部清掉。
-                foreach (var dir in new[] { "dist", "scripts", "package" })
+                if (SamePath(BundleRoot, InstallRoot))
                 {
-                    var path = Path.Combine(InstallRoot, dir);
-                    if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+                    // Windows 不能删除正在运行的卸载工具自身；其余目录可以全部清掉。
+                    foreach (var dir in new[] { "dist", "scripts", "package", "tests" })
+                    {
+                        var path = Path.Combine(InstallRoot, dir);
+                        if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+                    }
+                    AppendLog("程序文件已删除；关闭窗口后可手动删除本卸载工具。 ");
                 }
-                AppendLog("程序文件已删除；关闭窗口后可手动删除本卸载工具。 ");
+                else
+                {
+                    Directory.Delete(InstallRoot, recursive: true);
+                    AppendLog("程序文件已删除。");
+                }
             }
-            else
-            {
-                Directory.Delete(InstallRoot, recursive: true);
-                AppendLog("程序文件已删除。");
-            }
-        }
+        });
+        await Task.Run(RestartExplorerIfNeeded);
         SetStatus("卸载完成，菜单与文件关联已清理。", success: true);
         AppendLog("卸载完成。");
         MessageBox.Show("卸载完成。", "7zipContext", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -232,40 +327,40 @@ public sealed class SetupWindow : Window
             Path.Combine("scripts", "install.ps1"),
             Path.Combine("scripts", "uninstall.ps1"),
             Path.Combine("scripts", "7zipContext-menu.ps1"),
+            Path.Combine("scripts", "deployment.ps1"),
+            Path.Combine("scripts", "DeploymentFiles.cs"),
             Path.Combine("package", "AppxManifest.xml"),
+            Path.Combine("tests", "7zipContext.ComProbe", "bin", "Release", "net8.0-windows", "7zipContext.ComProbe.exe"),
         };
         var missing = required.Where(p => !File.Exists(Path.Combine(PayloadRoot, p))).ToArray();
         if (missing.Length > 0)
             throw new FileNotFoundException("安装包不完整，请重新下载并完整解压后再运行。缺少：" + string.Join("、", missing));
     }
 
-    private static void CopyPayload()
+    private static void CopyPayload(string targetRoot)
     {
-        Directory.CreateDirectory(InstallRoot);
-        foreach (var dir in new[] { "dist", "scripts", "package" })
-            CopyDirectory(Path.Combine(PayloadRoot, dir), Path.Combine(InstallRoot, dir));
+        Directory.CreateDirectory(targetRoot);
+        foreach (var dir in new[] { "dist", "scripts", "package", "tests" })
+            CopyDirectory(Path.Combine(PayloadRoot, dir), Path.Combine(targetRoot, dir));
 
         // 已安装目录也保留一份图形化工具，设置面板的「卸载」按钮可随时打开它。
         foreach (var name in new[]
                  {
                      "7zipContext.Setup.exe", "7zipContext.Setup.dll",
                      "7zipContext.Setup.deps.json", "7zipContext.Setup.runtimeconfig.json",
+                     "ZipContext.Core.dll",
                  })
         {
             var source = Path.Combine(BundleRoot, name);
-            var destination = Path.Combine(InstallRoot, name);
-            if (File.Exists(source) && !SamePath(source, destination)) File.Copy(source, destination, overwrite: true);
+            var destination = Path.Combine(targetRoot, name);
+            // 由已安装工具自己发起修复时，不替换它正在加载的自身程序集。
+            if (File.Exists(source) && !SamePath(BundleRoot, InstallRoot)) File.Copy(source, destination, overwrite: true);
         }
     }
 
     private static void CopyDirectory(string source, string destination)
     {
-        if (SamePath(source, destination)) return;
-        Directory.CreateDirectory(destination);
-        foreach (var file in Directory.GetFiles(source))
-            File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), overwrite: true);
-        foreach (var dir in Directory.GetDirectories(source))
-            CopyDirectory(dir, Path.Combine(destination, Path.GetFileName(dir)));
+        FileDeployment.CopyTree(source, destination, true);
     }
 
     private static bool SamePath(string left, string right) =>
@@ -279,7 +374,9 @@ public sealed class SetupWindow : Window
             "WindowsPowerShell", "v1.0", "powershell.exe");
         var quotedScript = "'" + script.Replace("'", "''") + "'";
         var command = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " +
-                      $"& {quotedScript} {string.Join(' ', switches)}";
+                      "$ErrorActionPreference = 'Stop'; try { " +
+                      $"& {quotedScript} {string.Join(' ', switches)}; exit $LASTEXITCODE " +
+                      "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }";
 
         var psi = new ProcessStartInfo
         {
@@ -291,6 +388,7 @@ public sealed class SetupWindow : Window
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        if (_deploymentToken is not null) psi.Environment[DeploymentLease.EnvironmentName] = _deploymentToken;
         psi.ArgumentList.Add("-NoProfile");
         psi.ArgumentList.Add("-ExecutionPolicy");
         psi.ArgumentList.Add("Bypass");
@@ -311,11 +409,55 @@ public sealed class SetupWindow : Window
         });
     }
 
+    private async Task<int> RunExecutable(string executable, params string[] arguments)
+    {
+        var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true };
+        if (_deploymentToken is not null) start.Environment[DeploymentLease.EnvironmentName] = _deploymentToken;
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        using var process = await Task.Run(() => Process.Start(start) ?? throw new IOException("无法启动候选程序准备引擎。"));
+        await process.WaitForExitAsync();
+        return process.ExitCode;
+    }
+
+    private async Task RecoverInterruptedInstallations()
+    {
+        var stages = await Task.Run(() => Directory.Exists(DeploymentRoot)
+            ? Directory.GetDirectories(DeploymentRoot, "install-*") : Array.Empty<string>());
+        foreach (var stage in stages)
+        {
+            try
+            {
+                var work = Path.Combine(stage, "transaction");
+                if (!File.Exists(Path.Combine(work, "transaction.xml"))) { await TryCleanupStage(stage); continue; }
+                var previous = await Task.Run(() => FileDeployment.Load(work, InstallRoot));
+                if (previous.Journal.State == "committed") { await TryCleanupStage(stage); continue; }
+                if (previous.Journal.State != "prepared" && previous.Journal.State != "rolledBack") await Task.Run(StopShellProcesses);
+                await Task.Run(previous.Rollback);
+                AppendLog("已恢复上次未完成操作的文件：" + stage);
+                await Task.Run(previous.Cleanup);
+                await TryCleanupStage(stage);
+            }
+            catch (Exception ex) { throw new IOException("上次部署恢复未完成，备份保留在：" + stage + "\n" + ex.Message, ex); }
+        }
+    }
+
+    private async Task TryCleanupStage(string stage)
+    {
+        try
+        {
+            var prefix = Path.GetFullPath(DeploymentRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!Path.GetFullPath(stage).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) throw new IOException("准备目录越出预期范围。");
+            await Task.Run(() => FileDeployment.DeleteOwnedTree(stage));
+        }
+        catch (Exception ex) { AppendLog("准备目录保留在 " + stage + "：" + ex.Message); }
+    }
+
     private void StopShellProcesses()
     {
         foreach (var name in new[] { "7zipContext", "7zipContext.Shell" })
             foreach (var process in Process.GetProcessesByName(name))
-                try { process.Kill(); } catch { }
+                try { process.Kill(); process.WaitForExit(5000); } catch { }
+                finally { process.Dispose(); }
 
         foreach (var process in Process.GetProcessesByName("dllhost"))
         {
@@ -323,16 +465,18 @@ public sealed class SetupWindow : Window
             {
                 if (process.Modules.Cast<ProcessModule>().Any(m =>
                         m.FileName.Contains("7zipContext", StringComparison.OrdinalIgnoreCase)))
-                    process.Kill();
+                { process.Kill(); process.WaitForExit(5000); }
             }
             catch { }
+            finally { process.Dispose(); }
         }
 
         var explorers = Process.GetProcessesByName("explorer");
         if (explorers.Length == 0) return;
         _explorerStopped = true;
         foreach (var process in explorers)
-            try { process.Kill(); } catch { }
+            try { process.Kill(); process.WaitForExit(5000); } catch { }
+            finally { process.Dispose(); }
     }
 
     private void RestartExplorerIfNeeded()
@@ -366,6 +510,7 @@ public sealed class SetupWindow : Window
         _openSettings.IsEnabled = !busy && File.Exists(Path.Combine(InstallRoot, "dist", "7zipContext.exe"));
         _removeFiles.IsEnabled = !busy;
         _removeEngine.IsEnabled = !busy;
+        _setAsDefault.IsEnabled = !busy;
         _progress.IsIndeterminate = busy;
     }
 

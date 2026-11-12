@@ -32,20 +32,23 @@ public static class EngineProvisioner
         [property: JsonPropertyName("installedAt")] string InstalledAt,
         [property: JsonPropertyName("origin")] string Origin);
 
-    public sealed record EnsureResult(bool Ok, string Message, string? Version, string? Origin)
+    public sealed record EnsureResult(bool Ok, string Message, string? Version, string? Origin, bool HasWarnings = false)
     {
         public string ToJson() => JsonSerializer.Serialize(new
         {
-            ok = Ok, message = Message, version = Version, origin = Origin,
+            ok = Ok, message = Message, version = Version, origin = Origin, warnings = HasWarnings,
         });
     }
 
-    private sealed record ReleaseInfo(string Tag, string Url, string? Digest);
+    private sealed record ReleaseInfo(string Tag, string Url, string? Digest, bool HasWarnings = false);
 
     // ---------------------------------------------------------------- 对外命令
 
     /// <summary>首次安装：确保引擎可用。本机已有就直接采纳，绝不联网。</summary>
     public static EnsureResult Ensure(string? explicitPath, string? explicitSource, bool forceDownload = false)
+        => explicitSource is not null ? throw new ArgumentException("自定义下载源已停用，请使用官方源或 -EnginePath 本机离线引擎。") : WithEngineLock(() => EnsureCore(explicitPath, forceDownload));
+
+    private static EnsureResult EnsureCore(string? explicitPath, bool forceDownload)
     {
         try
         {
@@ -58,8 +61,8 @@ public static class EngineProvisioner
                 if (!EngineLocator.IsUsable(full))
                     return Fail($"-EnginePath 指向的目录不完整：{full}（需要 7z.exe / 7zG.exe / 7zFM.exe / 7z.dll）");
                 var manualVersion = ReadVersionFromExe(Path.Combine(full, "7z.exe")) ?? "unknown";
-                Adopt(full, manualVersion, "local", "user-supplied", "");
-                return Ok($"已采用手动指定的 7-Zip 引擎 {manualVersion}：{full}", manualVersion, "manual");
+                var warning = Adopt(full, manualVersion, "local", "user-supplied", "");
+                return Ok(WithWarning($"已采用手动指定的 7-Zip 引擎 {manualVersion}：{full}", warning), manualVersion, "manual", !string.IsNullOrWhiteSpace(warning));
             }
 
             if (!forceDownload)
@@ -76,23 +79,23 @@ public static class EngineProvisioner
                     var v = same && meta!.Version.Length > 0
                         ? meta.Version
                         : ReadVersionFromExe(Path.Combine(pointer!, "7z.exe")) ?? "unknown";
-                    if (!same) Adopt(pointer!, v, "local", "preinstalled", "");
-                    return Ok($"7-Zip 引擎 {v} 已就绪，无需下载：{pointer}", v,
-                              same ? meta!.Origin : "local");
+                    var warning = !same ? Adopt(pointer!, v, "local", "preinstalled", "") : RefreshAssociations(pointer!);
+                    return Ok(WithWarning($"7-Zip 引擎 {v} 已就绪，无需下载：{pointer}", warning), v,
+                              same ? meta!.Origin : "local", !string.IsNullOrWhiteSpace(warning));
                 }
 
                 var local = ProbeLocal();
                 if (local is not null)
                 {
                     var version = ReadVersionFromExe(Path.Combine(local, "7z.exe")) ?? "unknown";
-                    Adopt(local, version, "local", "preinstalled", "");
-                    return Ok($"检测到本机已装 7-Zip {version}，直接复用，无需下载：{local}", version, "local");
+                    var warning = Adopt(local, version, "local", "preinstalled", "");
+                    return Ok(WithWarning($"检测到本机已装 7-Zip {version}，直接复用，无需下载：{local}", warning), version, "local", !string.IsNullOrWhiteSpace(warning));
                 }
             }
 
-            var (succeeded, reason, info) = DownloadLatest(explicitSource, forceDownload);
+            var (succeeded, reason, info) = DownloadLatest(forceDownload);
             return succeeded
-                ? Ok($"已下载并校验 7-Zip {info?.Tag}：{EngineLocator.ReadPointer()}", info?.Tag, "downloaded")
+                ? Ok(reason, info?.Tag, "downloaded", info?.HasWarnings == true)
                 : Fail(reason);
         }
         catch (Exception ex)
@@ -103,51 +106,37 @@ public static class EngineProvisioner
 
     /// <summary>只检查、不下载；每天最多联网一次（--force 可跳过节流）。</summary>
     public static EnsureResult CheckUpdate(bool force)
+        => WithEngineLock(() => CheckUpdateCore(force));
+
+    private static EnsureResult CheckUpdateCore(bool force)
     {
-        try
+        var current = ReadVersion() ?? "unknown";
+        var directory = EngineLocator.EngineDirectory();
+        var identity = (directory is null ? "missing" : Path.GetFullPath(directory).ToUpperInvariant()) + "|" + current;
+        return new UpdateCheckStore(EngineLocator.ConfigRoot).Check(identity, current, force, () =>
         {
-            var current = ReadVersion() ?? "unknown";
-            var cached = ReadCachedResult();
-            if (!force && !ShouldCheckNow())
-                return Ok(cached?.Message ?? $"今天已检查过（当前 {current}），可用 --force 强制查询。",
-                          current, "cached");
-
             var rel = FetchLatest(out var apiError);
-            if (rel is null)
-            {
-                // 离线时回放上次结论，绝不让「检查更新」变成硬失败。
-                var msg = cached is not null
-                    ? $"联网检查失败（{apiError}），沿用上次结论：{cached.Message}"
-                    : $"联网检查失败（{apiError}），且没有历史结论。不影响现有功能；可稍后重试或用 -EngineSource 指定可达的源。";
-                return new EnsureResult(true, msg, current, "offline");
-            }
-
-            TouchLastCheck();
+            if (rel is null) return new EnsureResult(true, $"联网检查失败：{apiError}。不影响现有引擎。", current, "offline");
             var cmp = CompareVersion(rel.Tag, current);
             var message = cmp > 0
                 ? $"发现新版本：当前 {current} → 最新 {rel.Tag}。运行 7zipContext.exe --update-engine 可升级。"
                 : $"当前 {current} 已是最新（官方 {rel.Tag}）。";
-            var result = new EnsureResult(true, message, current, cmp > 0 ? "update-available" : "up-to-date");
-            WriteCachedResult(result);
-            return result;
-        }
-        catch (Exception ex)
-        {
-            return new EnsureResult(true, $"联网检查失败：{ex.Message}。不影响现有功能。", ReadVersion(), "offline");
-        }
+            return new EnsureResult(true, message, current, cmp > 0 ? "update-available" : "up-to-date");
+        });
     }
-
     /// <summary>显式升级：下载最新版 → 校验 → 解包 → 原子切换指针；旧版保留可回滚。</summary>
     public static EnsureResult Update(string? explicitSource)
+        => explicitSource is not null ? throw new ArgumentException("自定义下载源已停用，请使用官方源或 -EnginePath 本机离线引擎。") : WithEngineLock(UpdateCore);
+
+    private static EnsureResult UpdateCore()
     {
         try
         {
             var before = ReadVersion() ?? "unknown";
-            var (succeeded, reason, info) = DownloadLatest(explicitSource, force: true);
+            var (succeeded, reason, info) = DownloadLatest(force: true);
             if (!succeeded) return Fail(reason);   // 保留底层具体原因，别再用笼统提示覆盖
-            PruneOldVersions();
-            return Ok($"已升级 7-Zip：{before} → {info?.Tag}（旧版本目录保留，可手动回滚 engine.path）。",
-                      info?.Tag, "updated");
+            return Ok($"已升级 7-Zip：{before} → {info?.Tag}（旧版本目录保留，可手动回滚 engine.path）。\n{reason}",
+                      info?.Tag, "updated", info?.HasWarnings == true);
         }
         catch (Exception ex)
         {
@@ -158,10 +147,11 @@ public static class EngineProvisioner
     /// <summary>当前引擎信息（排障用）。</summary>
     public static string Describe()
     {
-        var dir = EngineLocator.EngineDirectory();
+        var dir = EngineLocator.ReadPointer();
+        if (!EngineLocator.IsUsable(dir)) dir = EngineLocator.EngineDirectory();
         if (dir is null)
             return "未找到可用的 7-Zip 引擎。\n请运行 install.ps1，或使用 -EnginePath 指向本机已有的 7-Zip 目录。";
-        var meta = ReadMetadata();
+        var meta = StateStore.ReadMetadata(dir);
         var sb = new StringBuilder();
         sb.AppendLine($"引擎目录：{dir}");
         sb.AppendLine($"版本：{meta?.Version ?? ReadVersionFromExe(Path.Combine(dir, "7z.exe")) ?? "unknown"}");
@@ -274,7 +264,7 @@ public static class EngineProvisioner
 
     /// <summary>下载官方最新版并落地；返回 (是否成功, 可读原因, 版本信息)。</summary>
     private static (bool Ok, string Reason, ReleaseInfo? Info) DownloadLatest(
-        string? explicitSource, bool force)
+        bool force)
     {
         ReleaseInfo? info = null;
         var temp = Path.Combine(Path.GetTempPath(), "7zipContext-engine-" + Guid.NewGuid().ToString("N")[..8]);
@@ -285,35 +275,22 @@ public static class EngineProvisioner
             string? digest;
             string tag;
 
-            if (!string.IsNullOrWhiteSpace(explicitSource))
-            {
-                url = explicitSource;
-                digest = null;   // 自定义源无法取得官方 digest，改用 Authenticode 签名校验
-                tag = GuessTagFromUrl(url) ?? "custom";
-            }
-            else
-            {
-                var rel = FetchLatest(out var apiError);
-                if (rel is null)
-                    return (false,
-                        $"无法取得官方发布信息（{apiError}）。\n" +
-                        "请检查网络；或用 install.ps1 -EngineSource <可达的官方安装包 URL>；" +
-                        "或离线使用 install.ps1 -EnginePath <本机 7-Zip 目录>。", null);
-                url = rel.Url;
-                digest = rel.Digest;
-                tag = rel.Tag;
-                info = rel;
-
-                if (!force && CompareVersion(rel.Tag, ReadVersion() ?? "0") <= 0
-                    && EngineLocator.IsUsable(EngineLocator.ReadPointer()))
-                    return (true, $"已是最新版 {rel.Tag}，无需下载。", rel);
-            }
-
+            var rel = FetchLatest(out var apiError);
+            if (rel is null)
+                return (false, $"无法取得官方发布信息（{apiError}）。请检查网络，或用 install.ps1 -EnginePath <本机 7-Zip 目录> 离线安装。", null);
+            url = rel.Url;
+            digest = rel.Digest;
+            tag = rel.Tag;
+            info = rel;
+            if (string.IsNullOrWhiteSpace(digest)) return (false, "官方资产缺少 SHA256 digest，已拒绝下载。", info);
+            if (!force && CompareVersion(rel.Tag, ReadVersion() ?? "0") <= 0
+                && EngineLocator.IsUsable(EngineLocator.ReadPointer()))
+                return (true, $"已是最新版 {rel.Tag}，无需下载。", rel);
             var installer = Path.Combine(temp, "installer.exe");
             if (!Download(url, installer, out var downloadError))
                 return (false,
                     $"下载失败：{downloadError}\n地址：{url}\n" +
-                    "可用 -EngineSource 指定可达的源，或 -EnginePath 使用本机已有的 7-Zip。", info);
+                    "可用 -EnginePath 使用本机已有的 7-Zip。", info);
 
             var actualHash = Sha256(installer);
             if (digest is not null)
@@ -323,12 +300,6 @@ public static class EngineProvisioner
                 if (!string.Equals(actualHash, expected, StringComparison.OrdinalIgnoreCase))
                     return (false, $"SHA256 校验不通过，已丢弃下载文件。\n期望 {expected}\n实际 {actualHash}", info);
             }
-            else if (!HasAuthenticodeSignature(installer))
-            {
-                return (false,
-                    "自定义源缺少官方 digest，且安装包没有有效的 Authenticode 签名，已拒绝执行。", info);
-            }
-
             var extract = Path.Combine(temp, "extract");
             Directory.CreateDirectory(extract);
             var tar = Path.Combine(
@@ -340,8 +311,16 @@ public static class EngineProvisioner
             if (!File.Exists(Path.Combine(extract, "7z.exe")))
                 return (false, "安装包内未找到 7z.exe，可能不是官方 x64 安装器。", info);
 
+            // 版本来自网络或 URL，不能作为未经检查的目录路径使用。
+            if (tag is "." or ".." || tag.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                return (false, "发布版本号不能用作目录名，已放弃本次安装。", info);
+            if (!EngineLocator.IsUsable(extract) || !File.Exists(Path.Combine(extract, "License.txt")))
+                return (false, "安装包缺少引擎文件或 License.txt，已放弃本次安装。", info);
+
+            // 始终写新目录，不能先删正在生效的同版本引擎；中途失败仍保留旧指针。
             var dest = Path.Combine(EngineLocator.EngineRoot, tag);
-            if (Directory.Exists(dest)) Directory.Delete(dest, true);
+            if (Directory.Exists(dest))
+                dest = Path.Combine(EngineLocator.EngineRoot, tag + "-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dest);
             foreach (var f in EngineLocator.PayloadFiles)
                 File.Copy(Path.Combine(extract, f), Path.Combine(dest, f), true);
@@ -361,9 +340,10 @@ public static class EngineProvisioner
             if (!EngineLocator.IsUsable(dest))
                 return (false, "解包后四件套不齐全，已放弃本次安装。", info);
 
-            Adopt(dest, tag, "downloaded", url, actualHash);
+            var warning = Adopt(dest, tag, "downloaded", url, actualHash);
             info ??= new ReleaseInfo(tag, url, digest);
-            return (true, $"已安装 7-Zip {tag}：{dest}", info);
+            info = info with { HasWarnings = !string.IsNullOrWhiteSpace(warning) };
+            return (true, WithWarning($"已安装 7-Zip {tag}：{dest}", warning), info);
         }
         catch (Exception ex)
         {
@@ -461,34 +441,30 @@ public static class EngineProvisioner
 
     // ---------------------------------------------------------------- 元数据 / 节流
 
-    private static void Adopt(string dir, string version, string origin, string source, string hash)
+    private static EngineStateStore StateStore => new(EngineLocator.ConfigRoot);
+
+    private static string? Adopt(string dir, string version, string origin, string source, string hash)
     {
         var meta = new EngineInfo(version, dir, source, hash,
             DateTimeOffset.Now.ToString("O"), origin);
-        Directory.CreateDirectory(EngineLocator.ConfigRoot);
-        File.WriteAllText(EngineLocator.MetadataPath,
-            JsonSerializer.Serialize(meta, new JsonSerializerOptions { WriteIndented = true }),
-            new UTF8Encoding(false));
-        EngineLocator.WritePointer(dir);
+        var warning = StateStore.Commit(meta);
+        EngineLocator.InvalidateCache();
+        var registrationWarning = RefreshAssociations(dir);
+        return string.Join("\n", new[] { warning, registrationWarning }.Where(s => !string.IsNullOrEmpty(s)));
     }
 
     private static EngineInfo? ReadMetadata()
     {
-        try
-        {
-            return !File.Exists(EngineLocator.MetadataPath)
-                ? null
-                : JsonSerializer.Deserialize<EngineInfo>(File.ReadAllText(EngineLocator.MetadataPath));
-        }
-        catch { return null; }
+        return StateStore.ReadMetadata();
     }
 
     private static string? ReadVersion()
     {
-        var meta = ReadMetadata();
+        var directory = EngineLocator.ReadPointer();
+        if (!EngineLocator.IsUsable(directory)) directory = EngineLocator.EngineDirectory();
+        var meta = StateStore.ReadMetadata(directory);
         if (meta is not null && meta.Version.Length > 0) return meta.Version;
-        var exe = EngineLocator.Resolve("7z.exe");
-        return exe is null ? null : ReadVersionFromExe(exe);
+        return directory is null ? null : ReadVersionFromExe(Path.Combine(directory, "7z.exe"));
     }
 
     /// <summary>从 `7z.exe` 的 stdout 首行解析版本号（只用于本机已有引擎的显示）。</summary>
@@ -509,111 +485,49 @@ public static class EngineProvisioner
         return null;
     }
 
-    private static bool ShouldCheckNow()
-    {
-        try
-        {
-            if (!File.Exists(EngineLocator.LastCheckPath)) return true;
-            var text = File.ReadAllText(EngineLocator.LastCheckPath).Trim();
-            return !DateTimeOffset.TryParse(text, out var last)
-                   || (DateTimeOffset.UtcNow - last).TotalHours >= 24;
-        }
-        catch { return true; }
-    }
-
-    private static void TouchLastCheck()
-    {
-        try { File.WriteAllText(EngineLocator.LastCheckPath, DateTimeOffset.UtcNow.ToString("O")); }
-        catch { }
-    }
-
-    private static EnsureResult? ReadCachedResult()
-    {
-        try
-        {
-            if (!File.Exists(LastResultPath)) return null;
-            using var doc = JsonDocument.Parse(File.ReadAllText(LastResultPath));
-            var r = doc.RootElement;
-            return new EnsureResult(r.GetProperty("ok").GetBoolean(),
-                r.GetProperty("message").GetString() ?? "",
-                r.TryGetProperty("version", out var v) ? v.GetString() : null,
-                r.TryGetProperty("origin", out var o) ? o.GetString() : null);
-        }
-        catch { return null; }
-    }
-
-    private static string LastResultPath => Path.Combine(EngineLocator.ConfigRoot, "last-update-result.json");
-
-    private static void WriteCachedResult(EnsureResult r)
-    {
-        try { File.WriteAllText(LastResultPath, r.ToJson()); } catch { }
-    }
-
-    /// <summary>只保留当前版与上一版，删掉更早的下载目录（手动指定的目录永远不动）。</summary>
-    public static void PruneOldVersions()
-    {
-        try
-        {
-            var root = EngineLocator.EngineRoot;
-            if (!Directory.Exists(root)) return;
-            var current = EngineLocator.ReadPointer();
-            var dirs = Directory.EnumerateDirectories(root)
-                .OrderByDescending(d => ParseVersion(Path.GetFileName(d)))
-                .ToList();
-            foreach (var d in dirs.Skip(2))
-            {
-                if (current is not null && string.Equals(
-                        Path.GetFullPath(d), Path.GetFullPath(current), StringComparison.OrdinalIgnoreCase))
-                    continue;
-                try { Directory.Delete(d, true); } catch { }
-            }
-        }
-        catch { }
-    }
-
     // ---------------------------------------------------------------- 工具
 
-    private static EnsureResult Ok(string msg, string? v, string origin) => new(true, msg, v, origin);
+    private static EnsureResult Ok(string msg, string? v, string origin, bool hasWarnings = false) => new(true, msg, v, origin, hasWarnings);
     private static EnsureResult Fail(string msg) => new(false, msg, ReadVersion(), "failed");
 
-    public static void WriteStatus(EnsureResult result, string? path = null)
+    private static string WithWarning(string message, string? warning) =>
+        string.IsNullOrWhiteSpace(warning) ? message : message + "\n" + warning;
+
+    private static string? RefreshAssociations(string directory)
+    {
+        try { ShellIntegration.ShellIntegration.RefreshOpenWithForEngine(directory); return null; }
+        catch (Exception ex) { return "引擎可用，但可选打开方式刷新失败，请稍后重新注册：" + ex.Message; }
+    }
+
+    private static EnsureResult WithEngineLock(Func<EnsureResult> work)
     {
         try
         {
-            Directory.CreateDirectory(EngineLocator.ConfigRoot);
-            File.WriteAllText(path ?? StatusPath, result.ToJson(), new UTF8Encoding(false));
+            using var deployment = ZipContext.Deployment.DeploymentLease.Acquire(EngineLocator.ConfigRoot,
+                Environment.GetEnvironmentVariable(ZipContext.Deployment.DeploymentLease.EnvironmentName));
+            using var gate = EngineOperationLock.Acquire(EngineLocator.ConfigRoot);
+            EngineLocator.InvalidateCache();
+            return work();
         }
-        catch { }
+        catch (EngineBusyException ex) { return new(false, ex.Message, null, "busy"); }
+        catch (ZipContext.Deployment.DeploymentBusyException ex) { return new(false, ex.Message, null, "busy"); }
+        catch (Exception ex) { return Fail("引擎操作失败：" + ex.Message); }
+    }
+
+    public static bool WriteStatus(EnsureResult result, string? path = null)
+    {
+        try
+        {
+            AtomicTextFile.Write(path ?? StatusPath, result.ToJson());
+            return true;
+        }
+        catch { return false; }
     }
 
     private static string Sha256(string file)
     {
         using var fs = File.OpenRead(file);
         return Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
-    }
-
-    private static bool HasAuthenticodeSignature(string file)
-    {
-        // 自定义源没有官方 digest 时，至少要求有 Authenticode 签名（PowerShell 内置 cmdlet）。
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "powershell.exe",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-            };
-            psi.ArgumentList.Add("-NoProfile");
-            psi.ArgumentList.Add("-Command");
-            psi.ArgumentList.Add($"(Get-AuthenticodeSignature -LiteralPath '{file.Replace("'", "''")}').Status -eq 'Valid'");
-            using var p = Process.Start(psi);
-            if (p is null) return false;
-            var text = p.StandardOutput.ReadToEnd().Trim();
-            p.WaitForExit(10_000);
-            return text.Equals("True", StringComparison.OrdinalIgnoreCase);
-        }
-        catch { return false; }
     }
 
     private static bool RunProcess(string exe, IEnumerable<string> args, int timeoutMs, out string? output)
@@ -639,13 +553,6 @@ public static class EngineProvisioner
             return p.ExitCode == 0;
         }
         catch { return false; }
-    }
-
-    private static string? GuessTagFromUrl(string url)
-    {
-        var m = System.Text.RegularExpressions.Regex.Match(url, @"7z(\d{2})(\d{2})-x64\.exe",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        return m.Success ? $"{m.Groups[1].Value}.{m.Groups[2].Value}" : null;
     }
 
     /// <summary>按数值逐段比较版本（26.10 > 26.06，不能按字符串比）。</summary>

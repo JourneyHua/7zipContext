@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace ZipContext.Core;
 
 /// <summary>压缩包内单个条目（文件或文件夹）。</summary>
@@ -18,7 +20,22 @@ public sealed class TreeNode
     public long Size { get; set; }
     public long PackedSize { get; set; }
     public bool Encrypted { get; set; }
-    public List<TreeNode> Children { get; } = new();
+    private readonly List<TreeNode> _children = new();
+    private readonly Dictionary<(string Name, bool Folder), TreeNode> _index = new();
+    private bool _exposed;
+    // Preserve the mutable List API. Once exposed, rebuild before insertion because
+    // a retained caller reference can change even without another getter call.
+    public List<TreeNode> Children { get { _exposed = true; return _children; } }
+
+    private TreeNode? Find(string name, bool folder)
+    {
+        if (_exposed)
+        {
+            _index.Clear();
+            foreach (var child in _children) _index.TryAdd((child.Name, child.IsFolder), child);
+        }
+        return _index.GetValueOrDefault((name, folder));
+    }
 
     /// <summary>插入一条以 '/' 分隔的路径，自动建中间目录节点。</summary>
     public void Insert(ArchiveEntry entry)
@@ -28,7 +45,7 @@ public sealed class TreeNode
         for (int i = 0; i < parts.Length; i++)
         {
             bool last = i == parts.Length - 1;
-            var child = cur.Children.FirstOrDefault(c => c.Name == parts[i] && c.IsFolder == (!last || entry.IsFolder));
+            var child = cur.Find(parts[i], !last || entry.IsFolder);
             if (child is null)
             {
                 child = new TreeNode
@@ -37,7 +54,8 @@ public sealed class TreeNode
                     FullPath = string.Join('/', parts.Take(i + 1)),
                     IsFolder = !last || entry.IsFolder,
                 };
-                cur.Children.Add(child);
+                cur._children.Add(child);
+                cur._index.Add((child.Name, child.IsFolder), child);
             }
             if (last)
             {
@@ -52,12 +70,12 @@ public sealed class TreeNode
     /// <summary>按「文件夹在前、名称排序」整理整棵树。</summary>
     public void SortRecursive()
     {
-        Children.Sort((a, b) =>
+        _children.Sort((a, b) =>
         {
             if (a.IsFolder != b.IsFolder) return a.IsFolder ? -1 : 1;
             return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase);
         });
-        foreach (var c in Children) c.SortRecursive();
+        foreach (var c in _children) c.SortRecursive();
     }
 
     /// <summary>根层级条目（用于智能解压判定）。</summary>
@@ -90,26 +108,55 @@ public static class ArchiveFormats
     }
 
     public static bool IsArchive(string path)
+        => ExtractionEntry(path) is not null;
+
+    /// <summary>解析实际入口：传统 ZIP 从末尾 .zip 进入，未知分卷格式不猜测。</summary>
+    public static string? ExtractionEntry(string path)
     {
-        if (string.IsNullOrWhiteSpace(path)) return false;
-        if (Extractable.Contains(Path.GetExtension(path))) return true;
-        if (IsFirstSplitVolume(path)) return true;
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        if (IsTraditionalZipSegment(path))
+            return IsFirstSplitVolume(path) ? Path.ChangeExtension(path, ".zip") : null;
+        if (IsLaterSplitVolume(path)) return null;
+        var configuredFirst = SplitVolumeNames.MatchSuffix(path, ArchiveRules.Current.SplitFirstSuffixes);
+        if (configuredFirst is not null)
+            return IsFirstSplitVolume(path) ? path : null;
+        if (Extractable.Contains(Path.GetExtension(path))) return path;
 
         var lower = path.ToLowerInvariant();
         return lower.EndsWith(".tar.gz") || lower.EndsWith(".tar.bz2") ||
-               lower.EndsWith(".tar.xz") || lower.EndsWith(".tar.zst");
+               lower.EndsWith(".tar.xz") || lower.EndsWith(".tar.zst") ? path : null;
     }
 
-    /// <summary>是否是分卷首卷（默认 .001/.z01，可在 ini 配置）。只有首卷能交给 7-Zip 识别整组。</summary>
-    public static bool IsFirstSplitVolume(string path) =>
+    public static bool IsTraditionalZipSegment(string path) =>
+        !string.IsNullOrWhiteSpace(path) && Regex.IsMatch(
+            Path.GetExtension(path), @"^\.z[0-9]{2,}$", RegexOptions.IgnoreCase);
+
+    /// <summary>本地配套文件探测，无目录扫描、网络或子进程。</summary>
+    public static bool IsTraditionalZipEntry(string path) =>
         !string.IsNullOrWhiteSpace(path) &&
-        SplitVolumeNames.HasSuffix(path, ArchiveRules.Current.SplitFirstSuffixes);
+        Path.GetExtension(path).Equals(".zip", StringComparison.OrdinalIgnoreCase) &&
+        File.Exists(Path.ChangeExtension(path, ".z01"));
+
+    /// <summary>已支持的分卷入口候选；.z01 需要配套 .zip，实际执行时规范到后者。</summary>
+    public static bool IsFirstSplitVolume(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        if (IsTraditionalZipEntry(path)) return true;
+        var suffix = SplitVolumeNames.MatchSuffix(path, ArchiveRules.Current.SplitFirstSuffixes);
+        if (suffix is null) return false;
+        if (suffix.Equals(".z01", StringComparison.OrdinalIgnoreCase))
+            return File.Exists(Path.ChangeExtension(path, ".zip"));
+        return suffix.Equals(".001", StringComparison.OrdinalIgnoreCase) ||
+            Regex.IsMatch(suffix, @"^\.part0*1\.rar$", RegexOptions.IgnoreCase);
+    }
 
     /// <summary>是否是分卷后续卷（.002/.z02 等）。后续卷不能单独作为压缩包打开。</summary>
     public static bool IsLaterSplitVolume(string path) =>
         !string.IsNullOrWhiteSpace(path) &&
         !IsFirstSplitVolume(path) &&
-        SplitVolumeNames.HasSuffix(path, ArchiveRules.Current.SplitLaterSuffixes);
+        (IsTraditionalZipSegment(path) ||
+         SplitVolumeNames.HasSuffix(path, ArchiveRules.Current.SplitLaterSuffixes) ||
+         Regex.IsMatch(path, @"\.part[0-9]+\.rar$", RegexOptions.IgnoreCase));
 
     /// <summary>分卷组的基础名（去掉配置的分卷后缀），用于找同组文件。</summary>
     public static string SplitVolumeBasePath(string path)
@@ -122,7 +169,7 @@ public static class ArchiveFormats
 
     /// <summary>
     /// 取同一分卷组的全部已存在文件。传入非首卷时只返回该文件自身，避免把后续卷当成整组。
-    /// 规则来自 ini：配置后缀 + 首卷序号自动递增。
+    /// 只枚举同一编号家族，不跨格式合并；自动删除还须检查 PlanDeletion.CanDelete。
     /// </summary>
     public static IReadOnlyList<string> SplitVolumeFiles(string path)
     {

@@ -44,6 +44,8 @@ public sealed class SettingsWindow : Window
 
     // 默认打开方式
     private readonly TextBlock _assocInfo = new() { TextWrapping = TextWrapping.Wrap };
+    private readonly List<Button> _engineActions = new();
+    private bool _engineBusy;
 
     public SettingsWindow()
     {
@@ -106,12 +108,12 @@ public sealed class SettingsWindow : Window
     private UIElement BuildArchiveTab()
     {
         var panel = Stack();
-        panel.Children.Add(Tip("遇到奇怪分卷名时，只改这里的后缀列表即可，不用改程序。保存后下一次右键生效。"));
+        panel.Children.Add(Tip("已验证的分卷格式可在这里配置入口。未知格式不猜测解压入口，可使用「用 7-Zip 打开」。保存后下一次右键生效。"));
 
         panel.Children.Add(Group("分卷后缀",
-            Row(Label("首卷后缀", 90), _splitFirst, Tip("逗号分隔；例如 .001,.z01,.part1.rar")),
-            Row(Label("后续后缀", 90), _splitLater, Tip("逗号分隔；例如 .002,.z02,.part2.rar")),
-            Tip("只有首卷会显示解压；后续卷单独选中不会显示。首卷后缀带序号时，删除源文件会自动找同组后续卷。")));
+            Row(Label("首卷后缀", 90), _splitFirst, Tip("逗号分隔；留空禁用首卷后缀")),
+            Row(Label("后续后缀", 90), _splitLater, Tip("逗号分隔；留空禁用后续后缀列表")),
+            Tip("数字分卷从 .001 进入；.z01 需配套末尾 .zip，整组统一从 .zip 执行一次。后续卷不单独显示解压；删除范围不能确认时保留源文件。")));
 
         panel.Children.Add(Group("7-Zip 打开", _openWith7Zip,
             Tip("开启后，两套右键菜单都会多出独立的「用 7-Zip 打开」项；它只负责打开，不改变智能解压的识别规则。")));
@@ -130,12 +132,8 @@ public sealed class SettingsWindow : Window
     private void LoadArchive(bool resetToDefault = false)
     {
         var s = resetToDefault ? new AppSettings() : AppSettings.Load();
-        _splitFirst.Text = string.IsNullOrWhiteSpace(s.SplitFirstSuffixes)
-            ? ZipContext.Core.ArchiveRules.DefaultSplitFirstSuffixes
-            : s.SplitFirstSuffixes;
-        _splitLater.Text = string.IsNullOrWhiteSpace(s.SplitLaterSuffixes)
-            ? ZipContext.Core.ArchiveRules.DefaultSplitLaterSuffixes
-            : s.SplitLaterSuffixes;
+        _splitFirst.Text = s.SplitFirstSuffixes;
+        _splitLater.Text = s.SplitLaterSuffixes;
         _openWith7Zip.IsChecked = s.OpenWithSevenZip;
     }
 
@@ -147,7 +145,7 @@ public sealed class SettingsWindow : Window
         panel.Children.Add(Tip("经典菜单里「压缩文件预览」的显示规则。保存后下一次右键立即生效，不需要重启资源管理器。"));
 
         panel.Children.Add(Group("根目录",
-            Row(Label("最多显示项数", 130), _rootMax, Tip("0 = 不限制；默认 20")),
+            Row(Label("最多显示项数", 130), _rootMax, Tip("0 = 取消自定义上限；仍受预览总计 200 行安全上限保护；默认 20")),
             Row(Label("每个子文件夹展开", 130), _childrenPerFolder, Tip("只展开文件夹；0 = 不展开子层")),
             Row(Label("展开层数", 130), _maxDepth, Tip("0 = 只看根目录，1 = 到第二层，2 = 到第三层")),
             _showFiles));
@@ -199,8 +197,6 @@ public sealed class SettingsWindow : Window
 
             var first = NormalizeSuffixes(_splitFirst.Text);
             var later = NormalizeSuffixes(_splitLater.Text);
-            if (first.Count == 0)
-                throw new ArgumentException("「首卷后缀」不能为空；至少保留 .001");
 
             // 从磁盘现有值出发，避免只保存一个页签时把另一个页签重置掉
             var settings = AppSettings.Load();
@@ -220,21 +216,7 @@ public sealed class SettingsWindow : Window
         }
     }
 
-    private static List<string> NormalizeSuffixes(string raw)
-    {
-        var result = new List<string>();
-        foreach (var part in raw.Split(new[] { ',', ';', ' ', '\t', '\r', '\n' },
-                     StringSplitOptions.RemoveEmptyEntries))
-        {
-            var suffix = part.Trim();
-            if (suffix.Length == 0) continue;
-            if (!suffix.StartsWith('.')) suffix = "." + suffix;
-            if (!result.Contains(suffix, StringComparer.OrdinalIgnoreCase)) result.Add(suffix);
-        }
-        return result;
-    }
-
-    // ------------------------------------------------------------ 7-Zip 引擎
+    private static List<string> NormalizeSuffixes(string raw) => ZipContext.Core.SettingsDocument.ParseSuffixList(raw);
 
     private UIElement BuildEngineTab()
     {
@@ -243,32 +225,44 @@ public sealed class SettingsWindow : Window
         panel.Children.Add(_engineInfo);
 
         var buttons = Row();
-        buttons.Children.Add(MakeButton("刷新状态", _ => RefreshEngine()));
-        buttons.Children.Add(MakeButton("重新检测", async b => await RunEngine(() => EngineProvisioner.Ensure(null, null), b)));
-        buttons.Children.Add(MakeButton("检查更新", async b => await RunEngine(() => EngineProvisioner.CheckUpdate(force: true), b)));
-        buttons.Children.Add(MakeButton("升级引擎", async b => await RunEngine(() => EngineProvisioner.Update(null), b)));
+        buttons.Children.Add(TrackEngineButton(MakeButton("刷新状态", _ => RefreshEngine())));
+        buttons.Children.Add(EngineAction("重新检测", () => EngineProvisioner.Ensure(null, null)));
+        buttons.Children.Add(EngineAction("检查更新", () => EngineProvisioner.CheckUpdate(force: true)));
+        buttons.Children.Add(EngineAction("升级引擎", () => EngineProvisioner.Update(null)));
         panel.Children.Add(buttons);
 
         var buttons2 = Row();
-        buttons2.Children.Add(MakeButton("打开引擎目录", _ => OpenPath(EngineLocator.EngineDirectory() ?? EngineLocator.ConfigRoot)));
-        buttons2.Children.Add(MakeButton("查看安装脚本", _ => OpenInstallScript()));
+        buttons2.Children.Add(TrackEngineButton(MakeButton("打开引擎目录", _ => OpenPath(EngineLocator.EngineDirectory() ?? EngineLocator.ConfigRoot))));
+        buttons2.Children.Add(TrackEngineButton(MakeButton("查看安装脚本", _ => OpenInstallScript())));
         panel.Children.Add(buttons2);
 
-        panel.Children.Add(Tip("更新检查只提示，不自动替换；升级会保留旧版本目录，可手动回滚。GitHub 不可达时用 install.ps1 -EnginePath 或 -EngineSource。"));
+        panel.Children.Add(Tip("更新检查只提示，不自动替换；升级会保留旧版本目录，可手动回滚。GitHub 不可达时用 install.ps1 -EnginePath <本机引擎目录> 离线安装。"));
         return Wrap(panel);
     }
 
     private void RefreshEngine() => _engineInfo.Text = EngineProvisioner.Describe();
 
-    private async Task RunEngine(Func<EngineProvisioner.EnsureResult> work, Button btn)
+    private Button TrackEngineButton(Button button)
     {
-        btn.IsEnabled = false;
+        _engineActions.Add(button);
+        return button;
+    }
+
+    private Button EngineAction(string title, Func<EngineProvisioner.EnsureResult> work) =>
+        TrackEngineButton(MakeButton(title, async _ => await RunEngine(work)));
+
+    private async Task RunEngine(Func<EngineProvisioner.EnsureResult> work)
+    {
+        if (_engineBusy) return;
+        _engineBusy = true;
+        foreach (var button in _engineActions) button.IsEnabled = false;
         SetStatus("正在处理，请稍候…");
         try
         {
             var result = await Task.Run(work);
             SetStatus(result.Message, error: !result.Ok);
             RefreshEngine();
+            RefreshAssoc();
         }
         catch (Exception ex)
         {
@@ -276,7 +270,8 @@ public sealed class SettingsWindow : Window
         }
         finally
         {
-            btn.IsEnabled = true;
+            _engineBusy = false;
+            foreach (var button in _engineActions) button.IsEnabled = true;
         }
     }
 
@@ -290,15 +285,15 @@ public sealed class SettingsWindow : Window
 
         var buttons = Row();
         buttons.Children.Add(MakeButton("刷新状态", _ => RefreshAssoc()));
-        buttons.Children.Add(MakeButton("重新注册", _ =>
+        buttons.Children.Add(EngineAction("重新注册", () =>
         {
-            try { ShellIntegration.ShellIntegration.Install(); RefreshAssoc(); SetStatus("已重新注册打开方式。"); }
-            catch (Exception ex) { SetStatus($"注册失败：{ex.Message}", error: true); }
+            ShellIntegration.ShellIntegration.Install();
+            return new EngineProvisioner.EnsureResult(true, "已重新注册打开方式。", null, "registered");
         }));
         buttons.Children.Add(MakeButton("系统「默认应用」", _ => ShellIntegration.ShellIntegration.OpenDefaultAppsSettings()));
         panel.Children.Add(buttons);
 
-        panel.Children.Add(Tip("Windows 用哈希保护 UserChoice，程序无法静默设置「始终使用」。若右键打开仍不是 7-Zip，请在系统设置页手动选一次。"));
+        panel.Children.Add(Tip("安装和重新注册只添加可选打开方式，保留现有默认程序。需要设为默认时，请在系统「默认应用」中搜索 .zip、.7z、.rar，逐项选择 7-Zip 文件管理器。"));
         return Wrap(panel);
     }
 

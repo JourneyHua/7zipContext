@@ -7,4 +7,5 @@
     <RootNamespace>ZipContext.ComProbe</RootNamespace>
     <AssemblyName>7zipContext.ComProbe</AssemblyName>
   </PropertyGroup>
+  <ItemGroup><Compile Include="..\NativeResources.cs" Link="NativeResources.cs" /></ItemGroup>
 </Project>

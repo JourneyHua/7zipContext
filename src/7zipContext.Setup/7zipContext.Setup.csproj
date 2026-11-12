@@ -12,4 +12,7 @@
     <Version>1.1.1</Version>
     <Product>7zipContext 安装卸载工具</Product>
   </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\7zipContext.Core\7zipContext.Core.csproj" />
+  </ItemGroup>
 </Project>

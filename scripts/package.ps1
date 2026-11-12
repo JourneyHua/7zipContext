@@ -9,11 +9,14 @@ $ProgressPreference = 'SilentlyContinue'
 $root = Split-Path -Parent $PSScriptRoot
 $release = Join-Path $root 'release'
 $bundle = Join-Path $release '7zipContext-Setup'
-$stage = Join-Path $root 'dist-stage'
+$stage = Join-Path (Join-Path $root 'dist-stage') ('package-' + [Guid]::NewGuid().ToString('N'))
 $setupOut = Join-Path $stage 'Setup'
 $comprobeOut = Join-Path $stage 'ComProbe'
 $zip = Join-Path $release '7zipContext-Setup.zip'
 
+. (Join-Path $PSScriptRoot 'deployment.ps1')
+$deploymentContext = Enter-DeploymentLease
+try {
 $dotnet = Join-Path $env:USERPROFILE '.dotnet\dotnet.exe'
 if (-not (Test-Path $dotnet)) { $dotnet = 'dotnet' }
 
@@ -22,20 +25,18 @@ if (-not $SkipAppPublish) {
     if ($LASTEXITCODE -ne 0) { throw '应用发布失败' }
 }
 
-if (Test-Path $setupOut) { [System.IO.Directory]::Delete($setupOut, $true) }
 & $dotnet publish (Join-Path $root 'src\7zipContext.Setup\7zipContext.Setup.csproj') `
     -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false `
     -o $setupOut --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw '安装工具发布失败' }
 
 # install.ps1 的「菜单命令可执行（Invoke 实测）」必须保留，所以 ComProbe 也进 payload。
-if (Test-Path $comprobeOut) { [System.IO.Directory]::Delete($comprobeOut, $true) }
 & $dotnet publish (Join-Path $root 'tests\7zipContext.ComProbe\7zipContext.ComProbe.csproj') `
     -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false `
     -o $comprobeOut --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw 'ComProbe 发布失败' }
 
-if (Test-Path $bundle) { [System.IO.Directory]::Delete($bundle, $true) }
+if (Test-Path -LiteralPath $bundle) { Remove-DeploymentWorkspace $bundle $release }
 New-Item -ItemType Directory -Path $bundle -Force | Out-Null
 New-Item -ItemType Directory -Path $release -Force | Out-Null
 
@@ -47,7 +48,7 @@ $payload = Join-Path $bundle 'payload'
 New-Item -ItemType Directory -Path $payload -Force | Out-Null
 Copy-Item (Join-Path $root 'dist') (Join-Path $payload 'dist') -Recurse -Force
 New-Item -ItemType Directory -Path (Join-Path $payload 'scripts') -Force | Out-Null
-foreach ($script in 'install.ps1', 'uninstall.ps1', '7zipContext-menu.ps1') {
+foreach ($script in 'install.ps1', 'uninstall.ps1', '7zipContext-menu.ps1', 'deployment.ps1', 'DeploymentFiles.cs') {
     Copy-Item (Join-Path $root "scripts\$script") (Join-Path $payload "scripts\$script") -Force
 }
 Copy-Item (Join-Path $root 'package') (Join-Path $payload 'package') -Recurse -Force
@@ -58,12 +59,15 @@ Copy-Item (Join-Path $comprobeOut '*') $comprobeDestination -Recurse -Force
 
 $expected = @(
     '7zipContext.Setup.exe',
+    'ZipContext.Core.dll',
     'payload\dist\7zipContext.exe',
     'payload\dist\7zipContext.Shell.comhost.dll',
     'payload\dist\7zipContext.Classic.comhost.dll',
     'payload\scripts\install.ps1',
     'payload\scripts\uninstall.ps1',
     'payload\scripts\7zipContext-menu.ps1',
+    'payload\scripts\deployment.ps1',
+    'payload\scripts\DeploymentFiles.cs',
     'payload\package\AppxManifest.xml',
     'payload\tests\7zipContext.ComProbe\bin\Release\net8.0-windows\7zipContext.ComProbe.exe'
 )
@@ -78,6 +82,8 @@ $guide = @'
 1. 完整解压本 ZIP，不要直接在压缩软件窗口里运行。
 2. 双击 7zipContext.Setup.exe。
 3. 点击「安装 / 修复」，等待窗口提示成功。
+4. 可选：勾选「设为默认打开方式」（默认不勾选），安装成功后在系统设置中为 .zip/.7z/.rar 选择 7-Zip。
+   安装和修复只添加可选打开方式，保留现有默认程序。
 
 安装位置：%LOCALAPPDATA%\7zipContext\app\
 安装完成后可以删除本 ZIP、解压目录和安装工具，不影响使用。
@@ -101,10 +107,26 @@ $guide = @'
 [System.IO.File]::WriteAllText((Join-Path $bundle '使用说明.txt'), $guide,
     [System.Text.UTF8Encoding]::new($true))
 
-if (Test-Path $zip) { [System.IO.File]::Delete($zip) }
-Compress-Archive -Path (Join-Path $bundle '*') -DestinationPath $zip -CompressionLevel Optimal
-if (Test-Path $stage) { [System.IO.Directory]::Delete($stage, $true) }
+$zipCandidate = Join-Path $release ('7zipContext-Setup-' + [Guid]::NewGuid().ToString('N') + '.zip')
+$zipBackup = $zip + '.' + [Guid]::NewGuid().ToString('N') + '.bak'
+try {
+    Compress-Archive -Path (Join-Path $bundle '*') -DestinationPath $zipCandidate -CompressionLevel Optimal
+    if (Test-Path -LiteralPath $zip) { [IO.File]::Replace($zipCandidate, $zip, $zipBackup) }
+    else { [IO.File]::Move($zipCandidate, $zip) }
+    if (Test-Path -LiteralPath $zipBackup) {
+        try { [IO.File]::Delete($zipBackup) }
+        catch { Write-Warning "旧 ZIP 保留在：$zipBackup" }
+    }
+} finally {
+    if (Test-Path -LiteralPath $zipCandidate) { [IO.File]::Delete($zipCandidate) }
+}
+if (Test-Path -LiteralPath $stage) {
+    try { Remove-DeploymentWorkspace $stage (Join-Path $root 'dist-stage') }
+    catch { Write-Warning ('安装包已生成，准备目录保留：' + $_) }
+}
 
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
 Write-Host "安装包已生成：$zip" -ForegroundColor Green
 Write-Host "SHA256：$hash" -ForegroundColor DarkGray
+
+} finally { Exit-DeploymentLease $deploymentContext }

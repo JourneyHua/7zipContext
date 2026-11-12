@@ -77,25 +77,29 @@ internal static class Program
 
     private static void InvokeVerb(string zipPath, string clsidStr)
     {
+        using var resources = new NativeResources();
         var iid = new Guid("a08ce4d0-fa25-44ab-b57c-c7b1c323e0b9");
         var clsid = new Guid(clsidStr);
         var hr = CoCreateInstance(ref clsid, IntPtr.Zero, 0x4, ref iid, out var ppv);
+        resources.ComPointer(ppv);
         L($"create {clsidStr} hr=0x{hr:X8}");
         if (hr != 0) return;
-        var cmd = (IExplorerCommand)Marshal.GetObjectForIUnknown(ppv);
-        Marshal.Release(ppv);
+        var cmd = resources.Rcw<IExplorerCommand>(ppv);
+        resources.Release(ppv);
 
         var gi = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");
         hr = SHCreateItemFromParsingName(zipPath, IntPtr.Zero, ref gi, out var psi);
+        resources.ComPointer(psi);
         L($"SHCreateItem hr=0x{hr:X8}");
         if (hr != 0) return;
         var ga = new Guid("b63ea76d-1f85-456f-a19c-48159efa858b");
         hr = SHCreateShellItemArrayFromShellItem(psi, ref ga, out var ppsa);
-        Marshal.Release(psi);
+        resources.ComPointer(ppsa);
+        resources.Release(psi);
         L($"SHCreateShellItemArray hr=0x{hr:X8}");
         if (hr != 0) return;
-        var arr = (IShellItemArray)Marshal.GetObjectForIUnknown(ppsa);
-        Marshal.Release(ppsa);
+        var arr = resources.Rcw<IShellItemArray>(ppsa);
+        resources.Release(ppsa);
 
         L("Invoke start");
         hr = cmd.Invoke(arr, IntPtr.Zero);
@@ -104,12 +108,12 @@ internal static class Program
         Thread.Sleep(4000);
         var procs = System.Diagnostics.Process.GetProcessesByName("7zipContext");
         L($"7zipContext processes: {procs.Length}");
-        foreach (var p in procs)
-            L($"  pid={p.Id} title=[{p.MainWindowTitle}]");
+        foreach (var p in procs) using(p) L($"  pid={p.Id} title=[{p.MainWindowTitle}]");
     }
 
     private static void Main(string[] args)
     {
+        using var resources = new NativeResources();
         try { File.Delete(LogPath); } catch { }
 
         // 模式二：导出真实经典右键菜单树（定位级联子菜单来源）
@@ -140,15 +144,17 @@ internal static class Program
         IShellItemArray? arr = null;
         var gi = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");
         var h = SHCreateItemFromParsingName(zip, IntPtr.Zero, ref gi, out var psi);
+        resources.ComPointer(psi);
         if (h == 0)
         {
             var ga = new Guid("b63ea76d-1f85-456f-a19c-48159efa858b");
             h = SHCreateShellItemArrayFromShellItem(psi, ref ga, out var ppsa);
-            Marshal.Release(psi);
+        resources.ComPointer(ppsa);
+            resources.Release(psi);
             if (h == 0)
             {
-                arr = (IShellItemArray)Marshal.GetObjectForIUnknown(ppsa);
-                Marshal.Release(ppsa);
+                arr = resources.Rcw<IShellItemArray>(ppsa);
+                resources.Release(ppsa);
             }
         }
         L($"shell item array created: {(arr is null ? "NO" : "YES")}");
@@ -158,32 +164,33 @@ internal static class Program
             var clsid = new Guid(clsidStr);
             L($"--- {name} ---");
             var hr = CoCreateInstance(ref clsid, IntPtr.Zero, 0x4, ref iid, out var ppv);
+        resources.ComPointer(ppv);
             if (hr != 0) { L($"  create hr=0x{hr:X8}"); continue; }
 
-            var cmd = (IExplorerCommand)Marshal.GetObjectForIUnknown(ppv);
-            Marshal.Release(ppv);
+            var cmd = resources.Rcw<IExplorerCommand>(ppv);
+            resources.Release(ppv);
 
             hr = cmd.GetFlags(out var flags);
             L($"  GetFlags hr=0x{hr:X8} flags=0x{flags:X}");
 
             hr = cmd.EnumSubCommands(out var penum);
             L($"  EnumSubCommands hr=0x{hr:X8} ppEnum={(penum == IntPtr.Zero ? "null" : "NONNULL")}");
-            if (penum != IntPtr.Zero) Marshal.Release(penum);
+            if (penum != IntPtr.Zero) resources.Release(penum);
 
             if (arr is not null)
             {
                 hr = cmd.GetState(arr, true, out var st);
                 L($"  GetState(arr) hr=0x{hr:X8} state={st}");
                 hr = cmd.GetTitle(arr, out var pt);
+                resources.Pidl(pt);
                 var title = Marshal.PtrToStringUni(pt);
-                if (pt != IntPtr.Zero) CoTaskMemFree(pt);
                 L($"  GetTitle hr=0x{hr:X8} title={title}");
                 hr = cmd.GetIcon(arr, out var pi);
+                resources.Pidl(pi);
                 var icon = Marshal.PtrToStringUni(pi);
-                if (pi != IntPtr.Zero) CoTaskMemFree(pi);
                 L($"  GetIcon hr=0x{hr:X8} icon={icon}");
             }
-            Marshal.ReleaseComObject(cmd);
+            resources.ReleaseComObject(cmd);
         }
 
         L("ALL DONE");

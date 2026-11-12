@@ -1,285 +1,383 @@
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using ZipContext.Core;
 
 namespace ZipContext.App;
 
-/// <summary>
-/// 分发器：右键菜单（经典 + Win11 COM 服务器）通过命令行调用本程序；
-/// 无参启动（开始菜单图标 / 双击 exe）与 --settings 打开设置面板。
-/// </summary>
 public static class Program
 {
     [STAThread]
-    public static int Main(string[] args)
+    public static int Main(string[] args) => new CommandRunner().Run(args);
+}
+
+/// <summary>退出码是调用协议；提示信息不能代替失败返回值。</summary>
+internal static class CommandExit
+{
+    internal const int Success = 0, Failed = 1, InvalidArguments = 2, Cancelled = 3, Partial = 4;
+
+    internal static int FromEngine(int code) => code switch
     {
-        // 开始菜单图标来自 AppX 的 Application 节点，激活时不带参数 → 打开设置窗口。
-        if (args.Length == 0) return OpenSettings();
+        0 => Success, 1 => Partial, 7 => InvalidArguments, 255 => Cancelled, _ => Failed,
+    };
 
-        if (args[0].Equals("--settings", StringComparison.OrdinalIgnoreCase)) return OpenSettings();
+    // Ok 表示引擎仍可用；离线检查未完成不能冒充本次查询成功。
+    internal static int FromProvisioning(EngineProvisioner.EnsureResult result) =>
+        !result.Ok || result.Origin == "offline" ? Failed : result.HasWarnings ? Partial : Success;
 
-        var verb = args[0].ToLowerInvariant();
+    internal static int Aggregate(IEnumerable<int> results)
+    {
+        var codes = results.ToArray();
+        if (codes.Length == 0) return InvalidArguments;
+        if (codes.Contains(Partial) || (codes.Contains(Success) && codes.Any(c => c != Success))) return Partial;
+        if (codes.Contains(Failed)) return Failed;
+        if (codes.Contains(InvalidArguments)) return InvalidArguments;
+        if (codes.Contains(Cancelled)) return Cancelled;
+        return Success;
+    }
+}
+
+internal sealed class CommandRunner
+{
+    private readonly Func<SevenZipService> _serviceFactory;
+    private readonly Action<string, bool>? _notify;
+    private readonly Func<string, string?> _password;
+    private readonly Func<string, string?> _folder;
+    private readonly Action<ProcessStartInfo> _launch;
+    private bool _nonInteractive;
+
+    // 可替换边界仅用于隔离测试，不修改本机引擎指针或触发桌面操作。
+    internal CommandRunner(Func<SevenZipService>? serviceFactory = null,
+        Action<string, bool>? notify = null, Func<string, string?>? password = null,
+        Func<string, string?>? folder = null, Action<ProcessStartInfo>? launch = null)
+    {
+        _serviceFactory = serviceFactory ?? (() => new SevenZipService());
+        _notify = notify;
+        _password = password ?? PasswordDialog.Prompt;
+        _folder = folder ?? (initial =>
+        {
+            var dialog = new Microsoft.Win32.OpenFolderDialog { Title = "选择解压目标文件夹", InitialDirectory = initial };
+            return dialog.ShowDialog() == true ? dialog.FolderName : null;
+        });
+        _launch = launch ?? (start =>
+        {
+            using var process = Process.Start(start) ?? throw new IOException("未能启动目标程序。");
+        });
+    }
+
+    internal int Run(string[] args)
+    {
+        _nonInteractive = args.Any(a => a.Equals("--non-interactive", StringComparison.OrdinalIgnoreCase));
+        args = args.Where(a => !a.Equals("--non-interactive", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var verb = args.FirstOrDefault()?.ToLowerInvariant() ?? "--settings";
         var rest = args.Skip(1).ToArray();
-
-        // 引擎命令由 install.ps1 以隐藏窗口调用，绝不能弹 MessageBox（会挂住安装脚本）。
-        // 统一用「状态文件 + 退出码」回传；手动执行时加 --show 才弹窗。
-        if (verb is "--ensure-engine" or "--check-engine-update" or "--update-engine" or "--engine-info")
-            return RunEngineCommand(verb, rest);
-
+        var registrationAttempted = false;
         try
         {
+            if (verb is "--ensure-engine" or "--check-engine-update" or "--update-engine" or "--engine-info")
+                return RunEngineCommand(verb, rest);
             switch (verb)
             {
-                case "--smart-extract":
-                    RunSmartExtract(rest, deleteAfter: false);
-                    break;
-                case "--smart-extract-delete":
-                    RunSmartExtract(rest, deleteAfter: true);
-                    break;
-                case "--extract-to-name":
-                    RunExtractToName(rest);
-                    break;
-                case "--extract-to":
-                    RunExtractToOther(rest);
-                    break;
-                case "--add-zip":
-                    RunCompress("zip", rest);
-                    break;
-                case "--add-7z":
-                    RunCompress("7z", rest);
-                    break;
-                case "--quick-zip":
-                    RunCompress("zip", rest, openFolderAfter: true);
-                    break;
-                case "--open-with-7zip":
-                    RunOpenWithSevenZip(rest);
-                    break;
-                case "--test":
-                    if (rest.Length > 0) RunTest(rest[0]);
-                    break;
-                case "--open":
-                    // v1 旧快捷方式兼容：打开设置面板，而不是弹一句「没有主窗口」
+                case "--settings": case "--open":
+                    NoArguments(rest);
+                    RequireInteractive();
                     return OpenSettings();
+                case "--smart-extract": case "--smart-extract-delete":
+                    PathsOnly(rest);
+                    return RunSmartExtract(rest, verb == "--smart-extract-delete");
+                case "--extract-to-name":
+                    PathsOnly(rest);
+                    return RunExtractToName(rest);
+                case "--extract-to": return RunExtractToOther(rest);
+                case "--add-zip": case "--quick-zip": case "--add-7z":
+                    PathsOnly(rest);
+                    return RunCompress(verb == "--add-7z" ? "7z" : "zip", rest, verb == "--quick-zip");
+                case "--open-with-7zip":
+                    PathsOnly(rest);
+                    RequireInteractive();
+                    return RunOpenWithSevenZip(rest);
+                case "--test":
+                    PathsOnly(rest);
+                    if (rest.Length != 1) throw new ArgumentException("--test 必须且只能指定一个压缩包。");
+                    if (!File.Exists(rest[0])) throw new ArgumentException($"文件不存在：{rest[0]}");
+                    return WithPassword(rest[0], password =>
+                    {
+                        var result = Service().TestAsync(rest[0], password).GetAwaiter().GetResult();
+                        if (result.Success) ShowInfo("完整性测试通过 ✓");
+                        ReportRun(result, "完整性测试");
+                        return CommandExit.FromEngine(result.ExitCode);
+                    });
                 case "--install":
+                    NoArguments(rest);
+                    registrationAttempted = true;
                     ShellIntegration.ShellIntegration.Install();
-                    break;
-                case "--defaults":
-                    // Windows 不允许静默设默认程序，只能把用户送到「默认应用」页
-                    ShellIntegration.ShellIntegration.OpenDefaultAppsSettings();
-                    break;
+                    return CommandExit.Success;
                 case "--uninstall":
+                    NoArguments(rest);
+                    registrationAttempted = true;
                     ShellIntegration.ShellIntegration.Uninstall();
-                    break;
+                    return CommandExit.Success;
+                case "--defaults":
+                    NoArguments(rest);
+                    RequireInteractive();
+                    ShellIntegration.ShellIntegration.OpenDefaultAppsSettings();
+                    return CommandExit.Success;
                 default:
-                    // 裸路径（旧快捷方式 / 拖文件到 exe）→ 打开设置面板
-                    if (File.Exists(args[0])) return OpenSettings();
-                    ShowError($"未知命令：{verb}"); return 2;
+                    if (args.Length == 1 && File.Exists(args[0]))
+                    {
+                        RequireInteractive();
+                        return OpenSettings();
+                    }
+                    throw new ArgumentException($"未知命令或无效路径：{verb}");
             }
-            return 0;
         }
         catch (Exception ex)
         {
-            ShowError(ex.Message);
-            return 1;
-        }
-    }
-
-    private static void ShowError(string message) =>
-        MessageBox.Show(message, "7zipContext", MessageBoxButton.OK, MessageBoxImage.Error);
-
-    private static void ShowInfo(string message) =>
-        MessageBox.Show(message, "7zipContext", MessageBoxButton.OK, MessageBoxImage.Information);
-
-    /// <summary>
-    /// 打开设置面板。WinExe 没有 Application 实例，必须显式建一个，
-    /// 否则 Window.ShowDialog 无法运行 Dispatcher 消息循环（窗口一闪而过或直接抛异常）。
-    /// 进程里只会有一个 Application；引擎命令不走这里，所以不会冲突。
-    /// </summary>
-    private static int OpenSettings()
-    {
-        try
-        {
-            var app = Application.Current ?? new Application
+            // 隐藏注册命令始终不弹窗；错误状态文件失败也不能逃逸 Main。
+            if (verb is "--install" or "--uninstall")
             {
-                ShutdownMode = ShutdownMode.OnExplicitShutdown,
-            };
-            var window = new SettingsWindow();
-            app.MainWindow = window;
-            window.ShowDialog();
-            app.Shutdown();
-            return 0;
-        }
-        catch (Exception ex)
-        {
-            ShowError($"无法打开设置窗口：{ex.Message}");
-            return 1;
+                if (registrationAttempted) try
+                {
+                    EngineProvisioner.WriteStatus(new EngineProvisioner.EnsureResult(false, ex.Message, null,
+                        ex is EngineBusyException or ZipContext.Deployment.DeploymentBusyException ? "busy" : "failed"),
+                        Path.Combine(EngineLocator.ConfigRoot, "last-registration.json"));
+                }
+                catch { }
+                Console.Error.WriteLine(ex.Message);
+            }
+            else if (verb is "--ensure-engine" or "--check-engine-update" or "--update-engine" or "--engine-info")
+                Console.Error.WriteLine(ex.Message);
+            else ShowError(ex.Message);
+            return ExceptionExit(ex);
         }
     }
 
-    // ---------- 7-Zip 引擎：首次安装 / 更新检查 / 升级 ----------
-
-    private static int RunEngineCommand(string verb, string[] rest)
+    private static int ExceptionExit(Exception ex) => ex switch
     {
-        string? Value(string name)
-        {
-            for (var i = 0; i < rest.Length - 1; i++)
-                if (rest[i].Equals(name, StringComparison.OrdinalIgnoreCase)) return rest[i + 1];
-            return null;
-        }
-        var force = rest.Any(a => a is "--force" or "-Force");
-        var show = rest.Any(a => a is "--show" or "-Show");
-        var enginePath = Value("--engine-path") ?? Value("-EnginePath");
-        var engineSource = Value("--engine-source") ?? Value("-EngineSource");
+        OperationCanceledException => CommandExit.Cancelled,
+        ArgumentException => CommandExit.InvalidArguments,
+        _ => CommandExit.Failed,
+    };
 
+    private void Notify(string message, bool error)
+    {
+        if (_notify is not null) _notify(message, error);
+        else if (_nonInteractive)
+        {
+            if (error) Console.Error.WriteLine(message); else Console.WriteLine(message);
+        }
+        else MessageBox.Show(message, "7zipContext", MessageBoxButton.OK,
+            error ? MessageBoxImage.Error : MessageBoxImage.Information);
+    }
+    private void ShowError(string message) => Notify(message, true);
+    private void ShowInfo(string message) => Notify(message, false);
+    private void RequireInteractive()
+    {
+        if (_nonInteractive) throw new ArgumentException("此操作需要图形界面，不能使用 --non-interactive。");
+    }
+    private static void NoArguments(string[] args)
+    {
+        if (args.Length != 0) throw new ArgumentException("此命令不接受附加参数。");
+    }
+    private static void PathsOnly(string[] args)
+    {
+        if (args.Length == 0 || args.Any(a => string.IsNullOrWhiteSpace(a) || a.StartsWith("--", StringComparison.Ordinal)))
+            throw new ArgumentException("请提供有效输入路径；不支持的选项不能作为输入。以 -- 开头的文件名请使用完整路径。");
+    }
+    private SevenZipService Service()
+    {
+        var service = _serviceFactory();
+        if (_nonInteractive) service.UseGui = false;
+        return service;
+    }
+    private int OpenSettings()
+    {
+        Environment.SetEnvironmentVariable(ZipContext.Deployment.DeploymentLease.EnvironmentName, null);
+        var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        var window = new SettingsWindow();
+        app.MainWindow = window;
+        window.ShowDialog();
+        app.Shutdown();
+        return CommandExit.Success;
+    }
+
+    private int RunEngineCommand(string verb, string[] args)
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var flags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < args.Length; i++)
+        {
+            var key = args[i].ToLowerInvariant() switch
+            {
+                "-force" => "--force", "-show" => "--show",
+                "-enginepath" => "--engine-path", "-enginesource" => "--engine-source",
+                _ => args[i].ToLowerInvariant(),
+            };
+            if (key == "--engine-source") throw new ArgumentException("自定义下载源已停用；请使用官方源或 --engine-path 本机离线引擎。");
+            if (key is "--force" or "--show")
+            {
+                if (!flags.Add(key)) throw new ArgumentException($"重复选项：{key}");
+                continue;
+            }
+            if (key is not ("--engine-path" or "--engine-source" or "--status-path"))
+                throw new ArgumentException($"未知引擎选项：{args[i]}");
+            if (++i >= args.Length || string.IsNullOrWhiteSpace(args[i]) || args[i].StartsWith('-'))
+                throw new ArgumentException($"选项缺少值：{key}");
+            if (!values.TryAdd(key, args[i])) throw new ArgumentException($"重复选项：{key}");
+        }
+        if (_nonInteractive && flags.Contains("--show")) throw new ArgumentException("--show 与 --non-interactive 不能同时使用。");
+        if (values.ContainsKey("--engine-path") && verb != "--ensure-engine")
+            throw new ArgumentException("--engine-path 仅适用于 --ensure-engine。");
+        if (values.ContainsKey("--engine-source") && verb is not ("--ensure-engine" or "--update-engine"))
+            throw new ArgumentException("此命令不接受 --engine-source。");
+        if (flags.Contains("--force") && verb is not ("--ensure-engine" or "--check-engine-update"))
+            throw new ArgumentException("此命令不接受 --force。");
+        string? Value(string key) => values.GetValueOrDefault(key);
         EngineProvisioner.EnsureResult result;
+        int code;
         try
         {
             result = verb switch
             {
-                "--ensure-engine" => EngineProvisioner.Ensure(enginePath, engineSource, force),
-                "--check-engine-update" => EngineProvisioner.CheckUpdate(force),
-                "--update-engine" => EngineProvisioner.Update(engineSource),
+                "--ensure-engine" => EngineProvisioner.Ensure(Value("--engine-path"), Value("--engine-source"), flags.Contains("--force")),
+                "--check-engine-update" => EngineProvisioner.CheckUpdate(flags.Contains("--force")),
+                "--update-engine" => EngineProvisioner.Update(Value("--engine-source")),
                 _ => new EngineProvisioner.EnsureResult(true, EngineProvisioner.Describe(), null, "info"),
             };
+            code = CommandExit.FromProvisioning(result);
         }
         catch (Exception ex)
         {
             result = new EngineProvisioner.EnsureResult(false, ex.Message, null, "failed");
+            code = ExceptionExit(ex);
         }
-
-        // 只有「准备 / 升级」写 last-ensure.json（install.ps1 读它判断引擎是否就绪）。
-        // 检查 / 查询命令写到独立文件，避免把安装状态覆盖成一条更新提示。
-        if (verb is "--ensure-engine" or "--update-engine")
-            EngineProvisioner.WriteStatus(result, EngineProvisioner.StatusPath);
-        else
-            EngineProvisioner.WriteStatus(result,
-                Path.Combine(ZipContext.Core.EngineLocator.ConfigRoot, "last-query.json"));
-
-        if (show)
-        {
-            Action<string> notify = result.Ok ? ShowInfo : ShowError;
-            notify(result.Message);
-        }
-        else Console.WriteLine(result.Message);   // 直接命令行运行时也能看到
-        return result.Ok ? 0 : 1;
+        var statusPath = Value("--status-path") ?? (verb is "--ensure-engine" or "--update-engine"
+            ? EngineProvisioner.StatusPath : Path.Combine(EngineLocator.ConfigRoot, "last-query.json"));
+        if (!EngineProvisioner.WriteStatus(result, statusPath)) code = CommandExit.Failed;
+        if (flags.Contains("--show")) Notify(result.Message, !result.Ok);
+        else Console.WriteLine(result.Message);
+        return code;
     }
 
-    // ---------- 动词实现 ----------
-
-    private static void RunSmartExtract(string[] archives, bool deleteAfter)
-    {
-        var sevenZip = new SevenZipService();
-        var smart = new SmartExtractService(sevenZip);
-        int ok = 0, fail = 0;
-
-        foreach (var archive in ArchiveSelection.TargetsForExtraction(archives).Where(File.Exists))
-        {
-            string? password = null;
-            while (true)
-            {
-                try
-                {
-                    var result = smart.ExtractAsync(archive, deleteAfter, password).GetAwaiter().GetResult();
-                    if (result.Success) { ok++; break; }
-                    fail++;
-                    ShowError($"{Path.GetFileName(archive)}：{result.Error}");
-                    break;
-                }
-                catch (PasswordRequiredException)
-                {
-                    password = PasswordDialog.Prompt(Path.GetFileName(archive));
-                    if (password is null) { fail++; break; } // 用户取消
-                }
-            }
-        }
-
-        if (ok + fail > 1)
-            ShowInfo($"完成：成功 {ok} 个，失败 {fail} 个。");
-    }
-
-    private static void RunExtractToName(string[] archives)
-    {
-        var sevenZip = new SevenZipService();
-        foreach (var archive in ArchiveSelection.TargetsForExtraction(archives).Where(File.Exists))
-        {
-            var dest = Path.Combine(
-                Path.GetDirectoryName(Path.GetFullPath(archive))!,
-                ArchiveFormats.StripExtension(Path.GetFileName(archive)));
-            ExtractCore(sevenZip, archive, dest);
-        }
-    }
-
-    private static void RunExtractToOther(string[] args)
-    {
-        if (args.Length == 0) return;
-        var archive = args[0];
-        if (!File.Exists(archive)) return;
-
-        string dest;
-        if (args.Length > 1)
-        {
-            dest = args[1];
-        }
-        else
-        {
-            var dlg = new Microsoft.Win32.OpenFolderDialog
-            {
-                Title = "选择解压目标文件夹",
-                InitialDirectory = Path.GetDirectoryName(Path.GetFullPath(archive)),
-            };
-            if (dlg.ShowDialog() != true) return;
-            dest = dlg.FolderName;
-        }
-        ExtractCore(new SevenZipService(), archive, dest);
-    }
-
-    private static void ExtractCore(SevenZipService svc, string archive, string dest)
+    private int WithPassword(string archive, Func<string?, int> operation)
     {
         string? password = null;
         while (true)
         {
-            try
+            try { return operation(password); }
+            catch (PasswordRequiredException ex)
             {
-                var res = svc.ExtractAsync(archive, dest, password).GetAwaiter().GetResult();
-                if (!res.Success)
-                    ShowError($"{Path.GetFileName(archive)} 解压失败：{res.StdErr}");
-                return;
+                if (_nonInteractive) { ShowError(ex.Message); return CommandExit.Failed; }
+                password = _password(Path.GetFileName(archive));
+                if (password is null) return CommandExit.Cancelled;
             }
-            catch (PasswordRequiredException)
-            {
-                password = PasswordDialog.Prompt(Path.GetFileName(archive));
-                if (password is null) return;
-            }
+            catch (Exception ex) { ShowError($"{Path.GetFileName(archive)}：{ex.Message}"); return ExceptionExit(ex); }
         }
     }
 
-    private static void RunCompress(string format, string[] inputs, bool openFolderAfter = false)
+    private int ExtractBatch(string[] sources, Func<string, int> operation)
     {
-        if (inputs.Length == 0) return;
-        inputs = inputs.Where(File.Exists).Concat(inputs.Where(Directory.Exists)).Distinct().ToArray();
-        if (inputs.Length == 0) return;
-
-        // 输出名规则（Q11）：单选 → 同名；多选 → 父文件夹名（与菜单文字共用 NamingHelper）
-        var baseName = NamingHelper.TargetBaseName(inputs);
-        var parentDir = Path.GetDirectoryName(Path.GetFullPath(inputs[0]))!;
-        var outPath = Path.Combine(parentDir, $"{baseName}.{format}");
-        // 重名时加 (1)(2)
-        outPath = MakeUnique(outPath);
-
-        var svc = new SevenZipService();
-        var res = svc.CompressAsync(format, outPath, inputs).GetAwaiter().GetResult();
-        if (!res.Success)
+        var results = new List<int>();
+        var existing = new List<string>();
+        foreach (var source in sources.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            ShowError($"压缩失败：{res.StdErr}");
-            return;
-        }
-        if (openFolderAfter)
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            if (!File.Exists(source))
             {
-                FileName = "explorer.exe",
-                ArgumentList = { "/select,", outPath },
-                UseShellExecute = true,
-            });
+                ShowError($"文件不存在：{source}");
+                results.Add(CommandExit.InvalidArguments);
+            }
+            else if (ArchiveFormats.ExtractionEntry(source) is null && !ArchiveFormats.IsLaterSplitVolume(source))
+            {
+                ShowError($"不支持的压缩包或缺少分卷入口：{source}");
+                results.Add(CommandExit.InvalidArguments);
+            }
+            else existing.Add(source);
+        }
+        var targets = ArchiveSelection.TargetsForExtraction(existing);
+        foreach (var archive in targets)
+        {
+            if (!File.Exists(archive))
+            {
+                ShowError($"压缩包入口不存在：{archive}");
+                results.Add(CommandExit.InvalidArguments);
+            }
+            else results.Add(operation(archive));
+        }
+        if (targets.Count == 0 && results.Count == 0)
+        {
+            ShowError("没有可执行的压缩包入口，请选择首卷及所需配套文件。");
+            return CommandExit.InvalidArguments;
+        }
+        if (results.Count > 1)
+            ShowInfo($"完成：成功 {results.Count(c => c == CommandExit.Success)} 个，其余 {results.Count(c => c != CommandExit.Success)} 个。");
+        return CommandExit.Aggregate(results);
+    }
+
+    private int RunSmartExtract(string[] archives, bool deleteAfter) => ExtractBatch(archives, archive =>
+        WithPassword(archive, password =>
+        {
+            var result = new SmartExtractService(Service()).ExtractAsync(archive, deleteAfter, password).GetAwaiter().GetResult();
+            if (result.Error is not null) ShowError($"{Path.GetFileName(archive)}：{result.Error}");
+            return result.Success
+                ? (result.Error is null ? CommandExit.Success : CommandExit.Partial)
+                : CommandExit.FromEngine(result.ExitCode == 0 ? 2 : result.ExitCode);
+        }));
+
+    private int RunExtractToName(string[] archives) => ExtractBatch(archives, archive =>
+        ExtractCore(archive, Path.Combine(Path.GetDirectoryName(Path.GetFullPath(archive))!,
+            ArchiveFormats.StripExtension(Path.GetFileName(archive)))));
+
+    private int RunExtractToOther(string[] args)
+    {
+        var index = Array.FindIndex(args, a => a.Equals("--destination", StringComparison.OrdinalIgnoreCase));
+        if (index >= 0 && (index != args.Length - 2 || string.IsNullOrWhiteSpace(args[^1]) || args[^1].StartsWith("--")))
+            throw new ArgumentException("--destination 后必须提供目标目录，并放在参数末尾。");
+        var sources = index < 0 ? args : args[..index];
+        PathsOnly(sources);
+        if (index < 0 && _nonInteractive) throw new ArgumentException("非交互解压必须指定 --destination <目录>。");
+        string? dest = index >= 0 ? args[^1] : null;
+        var prompted = false;
+        return ExtractBatch(sources, archive =>
+        {
+            if (index < 0 && !prompted)
+            {
+                dest = _folder(Path.GetDirectoryName(Path.GetFullPath(archive))!);
+                prompted = true;
+            }
+            return dest is null ? CommandExit.Cancelled : ExtractCore(archive, dest);
+        });
+    }
+
+    private int ExtractCore(string archive, string dest) => WithPassword(archive, password =>
+    {
+        var result = Service().ExtractAsync(archive, dest, password).GetAwaiter().GetResult();
+        ReportRun(result, $"{Path.GetFileName(archive)} 解压");
+        return CommandExit.FromEngine(result.ExitCode);
+    });
+
+    private void ReportRun(SevenZipService.RunResult result, string operation)
+    {
+        if (result.Success) return;
+        var detail = string.IsNullOrWhiteSpace(result.StdErr) ? result.StdOut : result.StdErr;
+        ShowError($"{operation}未全部完成（引擎退出码 {result.ExitCode}）：{detail}");
+    }
+
+    private int RunCompress(string format, string[] inputs, bool openFolderAfter)
+    {
+        if (inputs.Any(p => !File.Exists(p) && !Directory.Exists(p)))
+            throw new ArgumentException("压缩输入包含不存在的文件或目录，未开始压缩。");
+        inputs = inputs.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var parent = Path.GetDirectoryName(Path.GetFullPath(inputs[0])) ?? throw new ArgumentException("不能直接压缩驱动器根目录。");
+        var output = MakeUnique(Path.Combine(parent, $"{NamingHelper.TargetBaseName(inputs)}.{format}"));
+        var result = Service().CompressAsync(format, output, inputs).GetAwaiter().GetResult();
+        ReportRun(result, "压缩");
+        var code = CommandExit.FromEngine(result.ExitCode);
+        if (code == CommandExit.Success && openFolderAfter && !_nonInteractive)
+        {
+            try { _launch(new ProcessStartInfo("explorer.exe") { ArgumentList = { "/select,", output }, UseShellExecute = true }); }
+            catch (Exception ex) { ShowError($"压缩成功，但打开结果目录失败：{ex.Message}"); return CommandExit.Partial; }
+        }
+        return code;
     }
 
     private static string MakeUnique(string path)
@@ -295,55 +393,13 @@ public static class Program
         }
     }
 
-    private static void RunOpenWithSevenZip(string[] paths)
+    private int RunOpenWithSevenZip(string[] paths)
     {
-        var files = paths
-            .Where(p => !string.IsNullOrWhiteSpace(p) && (File.Exists(p) || Directory.Exists(p)))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        if (files.Length == 0) return;
-
-        var fm = EngineLocator.Resolve("7zFM.exe");
-        if (fm is null)
-        {
-            ShowError("未找到 7zFM.exe。请先运行安装器准备 7-Zip 引擎，或在设置里关闭「用 7-Zip 打开」。");
-            return;
-        }
-
-        // 7zFM 是 GUI：用 ShellExecute + 引号参数路径；失败原因必须透传。
-        var args = string.Join(" ", files.Select(p => "\"" + p + "\""));
-        try
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = fm,
-                Arguments = args,
-                UseShellExecute = true,
-            });
-        }
-        catch (Exception ex)
-        {
-            ShowError($"打开失败：{ex.Message}");
-        }
-    }
-
-    private static void RunTest(string archive)
-    {
-        string? password = null;
-        while (true)
-        {
-            try
-            {
-                var res = new SevenZipService().TestAsync(archive, password).GetAwaiter().GetResult();
-                if (res.Success) ShowInfo("完整性测试通过 ✓");
-                else ShowError($"完整性测试失败：{res.StdErr}");
-                return;
-            }
-            catch (PasswordRequiredException)
-            {
-                password = PasswordDialog.Prompt(Path.GetFileName(archive));
-                if (password is null) return;
-            }
-        }
+        if (paths.Any(p => !File.Exists(p) && !Directory.Exists(p))) throw new ArgumentException("打开路径不存在。");
+        var fm = EngineLocator.Require("7zFM.exe");
+        var start = new ProcessStartInfo(fm) { UseShellExecute = true };
+        foreach (var path in paths.Distinct(StringComparer.OrdinalIgnoreCase)) start.ArgumentList.Add(path);
+        _launch(start);
+        return CommandExit.Success; // GUI 打开命令只确认启动，不代表用户之后的操作完成。
     }
 }

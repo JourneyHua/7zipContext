@@ -111,7 +111,7 @@ public class ExplorerCommandBase : ComInterop.IExplorerCommand
         var paths = ComInterop.GetPaths(psiItemArray);
         if (paths.Count == 0) return ComInterop.E_FAIL;
 
-        // 解压动词遇到分卷只传首卷；压缩动词仍传完整选择。
+        // 解压动词传分卷入口及普通压缩包，统一去重；压缩动词仍传完整选择。
         var targets = IsExtractVerb(Verb)
             ? ZipContext.Core.ArchiveSelection.TargetsForExtraction(paths)
             : paths;
@@ -181,7 +181,7 @@ public class ExplorerCommandBase : ComInterop.IExplorerCommand
         try
         {
             var log = Path.Combine(Path.GetTempPath(), "7zipContext-invoke-error.log");
-            File.AppendAllText(log,
+            ZipContext.Core.BoundedLog.TryAppend(log,
                 $"{DateTime.Now:HH:mm:ss} [{GetType().Name}] {what} | base={AppContext.BaseDirectory} | proc={Environment.ProcessPath} | {ex}\n");
         }
         catch { /* 诊断失败不影响返回 */ }

@@ -123,27 +123,31 @@ internal static class ContextMenuProbe
     /// <summary>按菜单序号取命令 id 并 InvokeCommand，用于确认某个菜单项究竟是谁。</summary>
     public static void InvokeByIndex(string zipPath, uint index, Action<string> log)
     {
+        using var resources = new NativeResources();
         var hr = SHParseDisplayName(zipPath, IntPtr.Zero, out var pidl, 0, out _);
+        resources.Pidl(pidl);
         if (hr != 0) { log($"SHParseDisplayName hr=0x{hr:X8}"); return; }
         var iidFolder = IID_IShellFolder;
         hr = SHBindToParent(pidl, ref iidFolder, out var psfPtr, out var pidlChild);
+        resources.ComPointer(psfPtr);
         if (hr != 0) { log($"SHBindToParent hr=0x{hr:X8}"); return; }
-        var folder = (IShellFolder)Marshal.GetObjectForIUnknown(psfPtr);
-        Marshal.Release(psfPtr);
-        var apidl = Marshal.AllocHGlobal(IntPtr.Size);
+        var folder = resources.Rcw<IShellFolder>(psfPtr);
+        resources.Release(psfPtr);
+        var apidl = resources.Allocate(IntPtr.Size);
         Marshal.WriteIntPtr(apidl, pidlChild);
         var iidCm = IID_IContextMenu;
         hr = folder.GetUIObjectOf(IntPtr.Zero, 1, apidl, ref iidCm, IntPtr.Zero, out var pcm);
-        Marshal.FreeHGlobal(apidl);
+        resources.ComPointer(pcm);
+        resources.FreeHGlobal(apidl);
         if (hr != 0) { log($"GetUIObjectOf hr=0x{hr:X8}"); return; }
-        var cm = (IContextMenu)Marshal.GetObjectForIUnknown(pcm);
-        Marshal.Release(pcm);
+        var cm = resources.Rcw<IContextMenu>(pcm);
+        resources.Release(pcm);
 
-        var hMenu = CreatePopupMenu();
+        var hMenu = resources.Menu(CreatePopupMenu());
         hr = cm.QueryContextMenu(hMenu, 0, 1, 0x7FFF, 0);
         log($"QueryContextMenu hr=0x{hr:X8}");
 
-        var buf = Marshal.AllocHGlobal(1024);
+        var buf = resources.Allocate(1024);
         var mii = new MENUITEMINFOW
         {
             cbSize = (uint)Marshal.SizeOf<MENUITEMINFOW>(),
@@ -153,7 +157,7 @@ internal static class ContextMenuProbe
         };
         if (GetMenuItemInfoW(hMenu, index, true, ref mii) == 0) { log("GetMenuItemInfo failed"); return; }
         log($"target index={index} id={mii.wID} fType=0x{mii.fType:X} submenu={(mii.hSubMenu != IntPtr.Zero)}");
-        Marshal.FreeHGlobal(buf);
+        resources.FreeHGlobal(buf);
 
         var info = new CMINVOKECOMMANDINFO
         {
@@ -161,18 +165,18 @@ internal static class ContextMenuProbe
             lpVerb = (IntPtr)(mii.wID - 1), // idCmdFirst = 1
             nShow = 1,
         };
-        var inv = Marshal.AllocHGlobal(Marshal.SizeOf<CMINVOKECOMMANDINFO>());
+        var inv = resources.Allocate(Marshal.SizeOf<CMINVOKECOMMANDINFO>());
         try
         {
             Marshal.StructureToPtr(info, inv, false);
             hr = cm.InvokeCommand(inv);
             log($"InvokeCommand hr=0x{hr:X8}");
         }
-        finally { Marshal.FreeHGlobal(inv); }
+        finally { resources.FreeHGlobal(inv); }
 
-        DestroyMenu(hMenu);
-        Marshal.ReleaseComObject(cm);
-        Marshal.ReleaseComObject(folder);
+        resources.Destroy(hMenu);
+        resources.ReleaseComObject(cm);
+        resources.ReleaseComObject(folder);
 
         Thread.Sleep(4000);
         log("--- 7zipContext windows after invoke ---");
@@ -181,38 +185,42 @@ internal static class ContextMenuProbe
 
     public static void Run(string zipPath, Action<string> log)
     {
+        using var resources = new NativeResources();
         var hr = SHParseDisplayName(zipPath, IntPtr.Zero, out var pidl, 0, out _);
+        resources.Pidl(pidl);
         log($"SHParseDisplayName hr=0x{hr:X8}");
         if (hr != 0) return;
 
         var iidFolder = IID_IShellFolder;
         hr = SHBindToParent(pidl, ref iidFolder, out var psfPtr, out var pidlChild);
+        resources.ComPointer(psfPtr);
         log($"SHBindToParent hr=0x{hr:X8}");
         if (hr != 0) return;
 
-        var folder = (IShellFolder)Marshal.GetObjectForIUnknown(psfPtr);
-        Marshal.Release(psfPtr);
+        var folder = resources.Rcw<IShellFolder>(psfPtr);
+        resources.Release(psfPtr);
 
         // apidl = 指向「一个 PIDL 指针」的数组
-        var apidl = Marshal.AllocHGlobal(IntPtr.Size);
+        var apidl = resources.Allocate(IntPtr.Size);
         Marshal.WriteIntPtr(apidl, pidlChild);
         var iidCm = IID_IContextMenu;
         hr = folder.GetUIObjectOf(IntPtr.Zero, 1, apidl, ref iidCm, IntPtr.Zero, out var pcm);
-        Marshal.FreeHGlobal(apidl);
+        resources.ComPointer(pcm);
+        resources.FreeHGlobal(apidl);
         log($"GetUIObjectOf(IContextMenu) hr=0x{hr:X8}");
         if (hr != 0) return;
 
-        var cm = (IContextMenu)Marshal.GetObjectForIUnknown(pcm);
-        Marshal.Release(pcm);
+        var cm = resources.Rcw<IContextMenu>(pcm);
+        resources.Release(pcm);
 
-        var hMenu = CreatePopupMenu();
+        var hMenu = resources.Menu(CreatePopupMenu());
         hr = cm.QueryContextMenu(hMenu, 0, 1, 0x7FFF, 0 /* CMF_NORMAL */);
         log($"QueryContextMenu hr=0x{hr:X8} count={GetMenuItemCount(hMenu)}");
 
         Dump(hMenu, log, depth: 0);
-        DestroyMenu(hMenu);
-        Marshal.ReleaseComObject(cm);
-        Marshal.ReleaseComObject(folder);
+        resources.Destroy(hMenu);
+        resources.ReleaseComObject(cm);
+        resources.ReleaseComObject(folder);
         log("MENU DUMP DONE");
     }
 

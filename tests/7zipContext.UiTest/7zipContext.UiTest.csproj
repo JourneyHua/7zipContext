@@ -14,4 +14,5 @@
     <ProjectReference Include="..\..\src\7zipContext.Core\7zipContext.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup><Compile Include="..\NativeResources.cs" Link="NativeResources.cs" /></ItemGroup>
 </Project>

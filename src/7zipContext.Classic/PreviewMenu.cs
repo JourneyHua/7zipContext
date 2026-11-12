@@ -14,7 +14,7 @@ namespace ZipContext.Classic;
 ///
 /// 安全三条：
 ///   1. 异常绝不抛回 explorer，全部吞掉并记日志。
-///   2. 列目录有 250ms 硬超时；超时降级成一行灰字，绝不阻塞菜单。
+///   2. 预览有时间与数量预算；阻塞读取不放在菜单线程，超限降级成灰字。
 ///   3. 定位 exe 用 Assembly.Location 起算，不用 AppContext.BaseDirectory。
 /// </summary>
 [ComVisible(true)]
@@ -25,12 +25,20 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
     public const string Clsid = "B9A10020-8C3F-4A2E-9E6D-5F1A2B3C4D20";
 
     private const int E_NOTIMPL = unchecked((int)0x80004001);
+    private const int E_FAIL = unchecked((int)0x80004005);
+    private const int E_INVALIDARG = unchecked((int)0x80070057);
     private const string PreviewTitle = "压缩文件预览";
 
     private readonly List<string> _paths = new();
-    private readonly List<string> _commands = new(); // 菜单 id 偏移 → CLI 动词
+    private readonly List<string?> _commands = new(); // ID 偏移 → CLI 动词；null 是不可执行的预览行
+    private readonly Func<IntPtr, uint, uint, UIntPtr, string?, bool> _insert = NativeMethods.InsertMenuW;
     private readonly List<string> _extractTargets = new(); // 实际解压目标：分卷只保留 .001
     private string? _archive;
+
+    public PreviewMenu() { }
+
+    // 允许测试在真实、未显示的 HMENU 上模拟部分插入失败，不修改全局 Win32 状态。
+    internal PreviewMenu(Func<IntPtr, uint, uint, UIntPtr, string?, bool> insert) => _insert = insert;
 
     // ---------------- IShellExtInit ----------------
 
@@ -46,12 +54,12 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
             foreach (var p in ShellData.SelectedPaths(pDataObj))
                 if (File.Exists(p) || Directory.Exists(p)) _paths.Add(p);
 
-            // 解压目标统一走 Core：包含 .001 时只保留首卷，.002 等后续卷不重复解压。
+            // 解压目标统一走 Core：分卷入口和普通压缩包共同处理，后续卷不重复解压。
             _extractTargets.AddRange(ZipContext.Core.ArchiveSelection.TargetsForExtraction(_paths));
 
             // 只有「单选且是压缩包」才做预览树；其余只给压缩动词
             if (_paths.Count == 1 && ArchiveFormats.IsArchive(_paths[0]))
-                _archive = _paths[0];
+                _archive = ZipContext.Core.ArchiveFormats.ExtractionEntry(_paths[0]);
         }
         catch (Exception ex) { Log("Initialize: " + ex); }
         return 0;
@@ -63,7 +71,24 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
     {
         try
         {
+            _commands.Clear();
+            // 本 handler 不改变默认动作，也不支持字符串规范动词调用。
+            if ((uFlags & (0x00000001u | 0x00000800u)) != 0) return 0;
             if (_paths.Count == 0) return 0;
+            var first = unchecked((uint)idCmdFirst);
+            var last = unchecked((uint)idCmdLast);
+            if (last < first) return 0;
+            var available = (ulong)last - first + 1;
+            bool CanAdd() => (ulong)_commands.Count < available && _commands.Count < ushort.MaxValue;
+            uint pos = indexMenu;
+            bool AddEntry(string text, string? verb, uint flags, IntPtr bmp)
+            {
+                if (!CanAdd()) return false;
+                var id = (uint)((ulong)first + (uint)_commands.Count);
+                if (!AddItem(hMenu, ref pos, flags, text, bmp, (UIntPtr)id)) return false;
+                _commands.Add(verb); // 只有 Win32 确认插入成功，才分配偏移。
+                return true;
+            }
 
             var icon = Icons.App;
             var baseName = ZipContext.Core.NamingHelper.TargetBaseName(_paths);
@@ -76,11 +101,7 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
             var extractBaseName = ZipContext.Core.NamingHelper.TargetBaseName(_extractTargets);
             if (extractBaseName.Length > 32) extractBaseName = extractBaseName[..32] + "…";
 
-            _commands.Clear();
-            uint pos = indexMenu;
-            uint id = (uint)idCmdFirst;
-
-            AddItem(hMenu, ref pos, NativeMethods.MF_SEPARATOR, null, IntPtr.Zero);
+            if (!AddItem(hMenu, ref pos, NativeMethods.MF_SEPARATOR, null, IntPtr.Zero)) return 0;
 
             if (showExtract)
             {
@@ -93,8 +114,7 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
                 };
                 foreach (var (text, verb) in extract)
                 {
-                    AddItem(hMenu, ref pos, NativeMethods.MF_STRING, text, icon, (UIntPtr)id++);
-                    _commands.Add(verb);
+                    if (!AddEntry(text, verb, NativeMethods.MF_STRING, icon)) return _commands.Count;
                 }
             }
 
@@ -102,42 +122,49 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
             foreach (var verb in new[] { "--add-zip", "--add-7z" })
             {
                 var ext = verb["--add-".Length..];
-                AddItem(hMenu, ref pos, NativeMethods.MF_STRING, $"添加到 {baseName}.{ext}", icon, (UIntPtr)id++);
-                _commands.Add(verb);
+                if (!AddEntry($"添加到 {baseName}.{ext}", verb, NativeMethods.MF_STRING, icon)) return _commands.Count;
             }
 
             // 独立「用 7-Zip 打开」：所有文件/文件夹都可点，可在 ini 里关闭
             if (ZipContext.Core.ArchiveRules.Current.OpenWithSevenZip)
             {
-                AddItem(hMenu, ref pos, NativeMethods.MF_STRING, "用 7-Zip 打开(O)", icon, (UIntPtr)id++);
-                _commands.Add("--open-with-7zip");
+                if (!AddEntry("用 7-Zip 打开(O)", "--open-with-7zip", NativeMethods.MF_STRING, icon)) return _commands.Count;
             }
 
-            if (_archive is null) return _commands.Count;
+            if (_archive is null || !CanAdd() || available - (ulong)_commands.Count < 2) return _commands.Count;
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var (status, lines) = ArchiveTree.Read(_archive);
-            sw.Stop();
-            PreviewMenu.Log($"preview {Path.GetFileName(_archive)} status={status} lines={lines.Count} elapsed={sw.ElapsedMilliseconds}ms");
-
-            AddItem(hMenu, ref pos, NativeMethods.MF_SEPARATOR, null, IntPtr.Zero);
-            AddItem(hMenu, ref pos, NativeMethods.MF_STRING, PreviewTitle, icon);
+            if (!AddItem(hMenu, ref pos, NativeMethods.MF_SEPARATOR, null, IntPtr.Zero) ||
+                !AddEntry(PreviewTitle, null, NativeMethods.MF_STRING | NativeMethods.MF_GRAYED, icon))
+                return _commands.Count;
+            var (status, lines) = ArchiveTree.ReadWithBudget(_archive,
+                Math.Min(PreviewBudget.ReadMilliseconds, PreviewBudget.TotalMilliseconds - (int)sw.ElapsedMilliseconds));
+            var readElapsed = sw.ElapsedMilliseconds;
+            var previewLog = $"preview {Path.GetFileName(_archive)} status={status} lines={lines.Count} elapsed={readElapsed}ms";
+            ThreadPool.QueueUserWorkItem(_ => Log(previewLog));
 
             if (status != TreeStatus.Ok)
             {
-                AddItem(hMenu, ref pos,
+                AddEntry(StatusText(status), null,
                     NativeMethods.MF_STRING | NativeMethods.MF_GRAYED,
-                    StatusText(status), IntPtr.Zero);
+                    IntPtr.Zero);
                 return _commands.Count;
             }
 
             foreach (var line in lines)
             {
+                if (!CanAdd()) break;
+                if (sw.ElapsedMilliseconds >= PreviewBudget.TotalMilliseconds)
+                {
+                    AddEntry("（其余预览已省略：处理超时）", null,
+                        NativeMethods.MF_STRING | NativeMethods.MF_GRAYED, IntPtr.Zero);
+                    break;
+                }
                 // 缩进已经做进位图（ForNode 按 depth 补透明），文字不再加全角空格，
                 // 否则图标贴最左、文字被推远，看起来是散的。
-                AddItem(hMenu, ref pos,
+                if (!AddEntry(line.Name, null,
                     NativeMethods.MF_STRING | NativeMethods.MF_GRAYED,
-                    line.Name, Icons.ForNode(line.IsDir, line.Depth));
+                    Icons.ForNode(line.IsDir, line.Depth))) break;
             }
 
             return _commands.Count;
@@ -145,7 +172,7 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
         catch (Exception ex)
         {
             Log("QueryContextMenu: " + ex);
-            return 0;
+            return _commands.Count; // 已插入的 ID 仍须报告，避免后续 handler 重用。
         }
     }
 
@@ -153,22 +180,23 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
     {
         try
         {
-            long verb = (long)pici.lpVerb;
-            if ((verb & 0xFFFF0000L) != 0) return 0; // 字符串动词不是我们的
+            if (pici.cbSize < Marshal.SizeOf<CMINVOKECOMMANDINFO>()) return E_INVALIDARG;
+            var verb = unchecked((ulong)pici.lpVerb.ToInt64());
+            if (verb > ushort.MaxValue) return E_FAIL; // 字符串或高位指针不是整数偏移。
 
             var idx = (int)verb;
-            if (idx < 0 || idx >= _commands.Count) return 0;
+            if (idx >= _commands.Count || _commands[idx] is not { } command) return E_FAIL;
 
-            var command = _commands[idx];
             // 解压动词只收首卷；压缩动词仍使用完整选择。
             var targets = IsExtractVerb(command) ? _extractTargets : _paths;
+            if (targets.Count == 0) return E_FAIL;
             Launch(command, targets);
             return 0;
         }
         catch (Exception ex)
         {
             Log("InvokeCommand: " + ex);
-            return 0;
+            return E_FAIL;
         }
     }
 
@@ -177,13 +205,13 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
 
     // ---------------- 内部 ----------------
 
-    private static void AddItem(IntPtr hMenu, ref uint pos, uint flags, string? text,
+    private bool AddItem(IntPtr hMenu, ref uint pos, uint flags, string? text,
         IntPtr bmp, UIntPtr id = default)
     {
-        if (!NativeMethods.InsertMenuW(hMenu, pos, flags | NativeMethods.MF_BYPOSITION, id, text))
+        if (!_insert(hMenu, pos, flags | NativeMethods.MF_BYPOSITION, id, text))
         {
             Log($"InsertMenuW 失败 flags=0x{flags:X} text={text}");
-            return;
+            return false;
         }
 
         if (bmp != IntPtr.Zero)
@@ -198,11 +226,13 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
                 Log($"SetMenuItemInfoW 失败 err={Marshal.GetLastWin32Error()}");
         }
         pos++;
+        return true;
     }
 
     private static string StatusText(TreeStatus s) => s switch
     {
-        TreeStatus.Timeout => "（读取超时，包太大）",
+        TreeStatus.Timeout => "（预览已省略：处理超时）",
+        TreeStatus.Omitted => "（预览已省略：超出安全上限或已有读取任务）",
         TreeStatus.Empty => "（空压缩包）",
         // 非 .zip 且引擎缺失时走这里（.zip 走 ZipArchive，不依赖引擎，天然可用）
         TreeStatus.Unsupported => "（未找到 7-Zip 引擎，请运行 install.ps1）",
@@ -256,7 +286,7 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
               .Append(" [pid=").Append(Environment.ProcessId).Append(' ')
               .Append(Path.GetFileNameWithoutExtension(Environment.ProcessPath)).Append("] ")
               .AppendLine(msg);
-            File.AppendAllText(path, sb.ToString(), Encoding.UTF8);
+            ZipContext.Core.BoundedLog.TryAppend(path, sb.ToString());
         }
         catch { /* 日志失败不影响菜单 */ }
     }
@@ -268,15 +298,21 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
 /// </summary>
 internal static class Icons
 {
-    private static readonly Dictionary<(bool Dir, int Depth), IntPtr> Cache = new();
+    [DllImport("ole32.dll")]
+    private static extern int CoInitializeEx(IntPtr reserved, uint flags);
+    [DllImport("ole32.dll")]
+    private static extern void CoUninitialize();
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(bool Dir, int Depth), Lazy<IntPtr>> Cache = new();
     private static IntPtr _app;
     private static byte[]? _dirPx;
     private static byte[]? _filePx;
     private static int _sz;
-    private static bool _loaded;
+    private static int _loaded;
+    private static int _loading;
 
     /// <summary>动词与标题统一用本程序图标。</summary>
-    public static IntPtr App { get { Ensure(); return _app; } }
+    public static IntPtr App { get { RequestLoad(); return Volatile.Read(ref _loaded) == 1 ? _app : IntPtr.Zero; } }
 
     /// <summary>
     /// 树行图标：菜单位图永远画在条目最左侧，所以缩进必须做进位图里 ——
@@ -284,24 +320,31 @@ internal static class Icons
     /// </summary>
     public static IntPtr ForNode(bool isDir, int depth)
     {
-        Ensure();
-        var key = (isDir, depth);
-        if (Cache.TryGetValue(key, out var bmp)) return bmp;
+        RequestLoad();
+        if (Volatile.Read(ref _loaded) == 0) return IntPtr.Zero;
+        var key = (isDir, Math.Clamp(depth, 0, 2));
 
         var src = isDir ? _dirPx : _filePx;
         if (src is null || _sz <= 0) return IntPtr.Zero;
 
-        bmp = Compose(src, depth);
-        Cache[key] = bmp;
-        return bmp;
+        return Cache.GetOrAdd(key, k => new Lazy<IntPtr>(() => Compose(src, k.Item2))).Value;
+    }
+
+    // 首次 Shell 图标查询可能触发 IO/第三方 handler；本次菜单可先显示文字，下次取缓存。
+    private static void RequestLoad()
+    {
+        if (Interlocked.CompareExchange(ref _loading, 1, 0) != 0) return;
+        ThreadPool.QueueUserWorkItem(_ => Ensure());
     }
 
     private static void Ensure()
     {
-        if (_loaded) return;
-        _loaded = true;
+        var comResult = -1;
         try
         {
+            // Shell 图标查询要求当前线程先初始化 COM；线程池按 MTA 使用。
+            comResult = CoInitializeEx(IntPtr.Zero, 0);
+            if (comResult < 0) return;
             // SHGFI_USEFILEATTRIBUTES + 假路径在本机实测返回 0（拿不到图标），
             // 所以优先用系统里的真实路径取图标；失败再退回假路径。
             _dirPx = Pixels(Environment.SystemDirectory, NativeMethods.FILE_ATTRIBUTE_DIRECTORY, false)
@@ -329,7 +372,12 @@ internal static class Icons
             }
         }
         catch { /* 拿不到图标就退回纯文字，不影响可用性 */ }
-        finally { PreviewMenu.Log($"icons: dir={(_dirPx is not null)} file={(_filePx is not null)} app=0x{_app:X} size={_sz}"); }
+        finally
+        {
+            if (comResult >= 0) CoUninitialize();
+            Volatile.Write(ref _loaded, 1);
+            PreviewMenu.Log($"icons: dir={(_dirPx is not null)} file={(_filePx is not null)} app=0x{_app:X} size={_sz}");
+        }
     }
 
     /// <summary>取图标的 32bpp 像素（BGRA）。失败返回 null。</summary>

@@ -97,17 +97,19 @@ public static class EngineLocator
     public static string? ReadPointer()
     {
         if (!File.Exists(PointerPath)) return null;
-        var text = File.ReadAllText(PointerPath, Encoding.UTF8).Trim();
+        var text = AtomicTextFile.Read(PointerPath).Trim();
         return text.Length == 0 ? null : text;
     }
 
     /// <summary>原子写入指针（先写临时文件再替换，避免菜单读到半截内容）。</summary>
     public static void WritePointer(string dir)
     {
-        Directory.CreateDirectory(ConfigRoot);
-        var tmp = PointerPath + ".tmp";
-        File.WriteAllText(tmp, dir, new UTF8Encoding(false));
-        File.Move(tmp, PointerPath, true);
+        AtomicTextFile.Write(PointerPath, dir);
+        InvalidateCache();
+    }
+
+    public static void InvalidateCache()
+    {
         lock (Sync) { _cachedDir = null; }
     }
 

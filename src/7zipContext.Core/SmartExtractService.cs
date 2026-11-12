@@ -54,13 +54,17 @@ public sealed class SmartExtractService
         SmartExtractPlan Plan,
         bool Success,
         string? Error,
-        bool ArchiveDeleted);
+        bool ArchiveDeleted,
+        int ExitCode = 0);
 
     /// <summary>执行智能解压；deleteAfter 成功后把压缩包删进回收站。</summary>
     public async Task<SmartExtractResult> ExtractAsync(string archivePath, bool deleteAfter,
         string? password = null, IProgress<string>? progress = null,
         CancellationToken ct = default)
     {
+        var rules = ArchiveRules.Current;
+        var deletion = deleteAfter ? SplitVolumeNames.PlanDeletion(archivePath,
+            rules.SplitFirstSuffixes, rules.SplitLaterSuffixes) : null;
         SmartExtractPlan plan;
         try
         {
@@ -68,11 +72,13 @@ public sealed class SmartExtractService
             plan = Plan(entries, archivePath);
         }
         catch (PasswordRequiredException) { throw; }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             return new SmartExtractResult(
                 new SmartExtractPlan(Path.GetDirectoryName(archivePath)!, null, false),
-                false, $"读取压缩包结构失败：{ex.Message}", false);
+                false, $"读取压缩包结构失败：{ex.Message}", false,
+                ex is SevenZipException { ExitCode: int code } ? code : 2);
         }
 
         progress?.Report($"正在解压到 {plan.DestDir} ...");
@@ -82,15 +88,36 @@ public sealed class SmartExtractService
         if (!run.Success)
         {
             // 失败绝不删包
-            return new SmartExtractResult(plan, false, DescribeFailure(run), false);
+            return new SmartExtractResult(plan, false, DescribeFailure(run), false, run.ExitCode);
         }
 
         bool deleted = false;
         if (deleteAfter)
         {
+            if (deletion is not { CanDelete: true })
+                return new SmartExtractResult(plan, true,
+                    $"解压成功，但已保留全部源文件：{deletion?.Reason}", false);
+            if (deletion.Files.Count > 1 || SplitVolumeNames.HasSuffix(archivePath, rules.SplitFirstSuffixes) ||
+                System.Text.RegularExpressions.Regex.IsMatch(archivePath, @"\.(?:[0-9]+|part[0-9]+\.rar)$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            {
+                int? usedVolumes;
+                try { usedVolumes = await _sevenZip.ReadVolumeCountAsync(archivePath, password, ct); }
+                catch (OperationCanceledException) { throw; }
+                catch { usedVolumes = null; }
+                if (usedVolumes != deletion.Files.Count)
+                    return new SmartExtractResult(plan, true,
+                        "解压成功，但引擎报告的分卷数量缺失或与同名文件不一致，已保留全部源文件。", false);
+            }
+            var current = SplitVolumeNames.PlanDeletion(archivePath,
+                rules.SplitFirstSuffixes, rules.SplitLaterSuffixes);
+            if (!current.CanDelete || !deletion.Files.SequenceEqual(current.Files, StringComparer.OrdinalIgnoreCase))
+                return new SmartExtractResult(plan, true,
+                    "解压成功，但分卷组在解压期间发生变化，已保留全部源文件。", false);
+            ct.ThrowIfCancellationRequested();
             progress?.Report("解压成功，正在把分卷文件移入回收站...");
             // 分卷包要删整组：只删 .001 会留下 .002 等孤儿文件。
-            var volumeFiles = ArchiveFormats.SplitVolumeFiles(archivePath);
+            var volumeFiles = deletion.Files;
             string? deleteError = null;
             var allDeleted = true;
             foreach (var file in volumeFiles)

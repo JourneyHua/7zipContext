@@ -69,108 +69,152 @@ internal static class ArchiveFormats
     public static bool IsArchive(string path) => ZipContext.Core.ArchiveFormats.IsArchive(path);
 }
 
-public enum TreeStatus { Ok, Empty, Timeout, Unsupported, Error }
+public enum TreeStatus { Ok, Empty, Timeout, Unsupported, Error, Omitted }
 
 public readonly record struct TreeLine(int Depth, string Name, bool IsDir);
 
 /// <summary>
 /// 压缩包目录树提供者。
-/// 硬约束（实测）：7z.exe 启动就要 120ms，条目按 8µs 累加，所以必须有硬超时。
-/// .zip 走 ZipArchive 读中央目录，不起进程，毫秒级。
+/// 读取、配置、建树和排序共用预算；菜单线程只进行有上限的等待。
+/// 同时最多一个工作任务，阻塞 IO 即使无法及时取消，也不能堆积后台线程。
 /// </summary>
 internal static class ArchiveTree
 {
-    private const int TimeoutMs = 250;
+    private static readonly SemaphoreSlim ReaderSlot = new(1, 1);
 
-    public static (TreeStatus Status, List<TreeLine> Lines) Read(string path)
+    public static (TreeStatus Status, List<TreeLine> Lines) Read(string path) =>
+        ReadWithBudget(path, PreviewBudget.TotalMilliseconds);
+
+    public static (TreeStatus Status, List<TreeLine> Lines) ReadWithBudget(string path, int milliseconds)
+    {
+        var clock = Stopwatch.StartNew();
+        if (milliseconds <= 0) return (TreeStatus.Timeout, new());
+        if (!ReaderSlot.Wait(0)) return (TreeStatus.Omitted, new());
+        var cancellation = new CancellationTokenSource();
+        var budget = new PreviewBudget(Math.Min(milliseconds, PreviewBudget.TotalMilliseconds), cancellation.Token);
+        Task<(TreeStatus Status, List<TreeLine> Lines)> task;
+        try
+        {
+            task = Task.Run(() =>
+            {
+                try { return ReadCore(path, budget); }
+                finally { cancellation.Dispose(); ReaderSlot.Release(); }
+            });
+        }
+        catch { cancellation.Dispose(); ReaderSlot.Release(); return (TreeStatus.Error, new()); }
+        try
+        {
+            var remaining = Math.Min(milliseconds, PreviewBudget.TotalMilliseconds) - (int)clock.ElapsedMilliseconds;
+            if (remaining > 0 && task.Wait(remaining)) return task.GetAwaiter().GetResult();
+            // 不在菜单线程同步执行取消回调（终止子进程也可能耗时）。
+            try { _ = cancellation.CancelAsync(); } catch (ObjectDisposedException) { }
+            return (TreeStatus.Timeout, new());
+        }
+        catch { return (TreeStatus.Error, new()); }
+    }
+
+    private static (TreeStatus Status, List<TreeLine> Lines) ReadCore(string path, PreviewBudget budget)
     {
         var lines = new List<TreeLine>();
         try
         {
+            budget.Check();
             if (!File.Exists(path)) return (TreeStatus.Error, lines);
+            if (new FileInfo(path).Length > PreviewBudget.MaxArchiveBytes) throw new PreviewLimitException();
+            budget.Check();
 
             var isZip = Path.GetExtension(path).Equals(".zip", StringComparison.OrdinalIgnoreCase)
                         || Path.GetExtension(path).Equals(".zipx", StringComparison.OrdinalIgnoreCase);
 
             List<string> names;
             var status = TreeStatus.Ok;
-            if (isZip) names = ReadZipNames(path);
-            else names = Read7zNames(path, out status, out lines);
+            if (isZip && !ZipContext.Core.ArchiveFormats.IsTraditionalZipEntry(path)) names = ReadZipNames(path, budget);
+            else names = Read7zNames(path, budget, out status);
 
             if (status != TreeStatus.Ok) return (status, lines);
             if (names.Count == 0) return (TreeStatus.Empty, lines);
 
-            return (TreeStatus.Ok, Render(BuildTree(names)));
+            return (TreeStatus.Ok, Render(BuildTree(names, budget), budget));
         }
+        catch (OperationCanceledException) { return (TreeStatus.Timeout, new()); }
+        catch (InvalidOperationException ex) when (ex.InnerException is OperationCanceledException)
+        { return (TreeStatus.Timeout, new()); }
+        catch (PreviewLimitException) { return (TreeStatus.Omitted, new()); }
+        catch (ZipContext.Core.SevenZipLimitException) { return (TreeStatus.Omitted, new()); }
         catch (InvalidDataException) { return (TreeStatus.Error, lines); }
         catch (Exception) { return (TreeStatus.Error, lines); }
     }
 
     // ---------------- 取条目名 ----------------
 
-    private static List<string> ReadZipNames(string path)
+    private static List<string> ReadZipNames(string path, PreviewBudget budget)
     {
         var list = new List<string>();
-        using var zip = ZipFile.OpenRead(path);
+        using var input = new PreviewReadStream(new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete), budget);
+        CheckZipDirectory(input, budget);
+        using var zip = new ZipArchive(input, ZipArchiveMode.Read);
+        if (zip.Entries.Count > PreviewBudget.MaxEntries) throw new PreviewLimitException();
         foreach (var e in zip.Entries)
+        {
+            budget.Check();
             if (!string.IsNullOrEmpty(e.FullName))
                 list.Add(e.FullName.Replace('\\', '/'));
+        }
         return list;
     }
 
-    private static List<string> Read7zNames(string path, out TreeStatus status, out List<TreeLine> lines)
+    // 在 ZipArchive 一次性载入中央目录前检查声明的条目数/大小；ZIP64 暂省略预览。
+    private static void CheckZipDirectory(Stream input, PreviewBudget budget)
     {
-        lines = new List<TreeLine>();
+        var tail = new byte[(int)Math.Min(input.Length, 65557)];
+        input.Seek(-tail.Length, SeekOrigin.End);
+        input.ReadExactly(tail);
+        for (var i = tail.Length - 22; i >= 0; i--)
+        {
+            if ((i & 255) == 0) budget.Check();
+            if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(i)) != 0x06054b50) continue;
+            ushort U16(int offset) => System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(i + offset));
+            uint U32(int offset) => System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(i + offset));
+            if (i + 22 + U16(20) != tail.Length) continue;
+            if (U16(4) != 0 || U16(6) != 0 || U16(8) != U16(10) ||
+                U16(10) > PreviewBudget.MaxEntries || U32(12) > PreviewBudget.MaxDirectoryBytes ||
+                U32(16) == uint.MaxValue) throw new PreviewLimitException();
+            input.Position = 0;
+            return;
+        }
+        throw new InvalidDataException();
+    }
+
+    private static List<string> Read7zNames(string path, PreviewBudget budget, out TreeStatus status)
+    {
+        budget.Check();
         var exe = SevenZipPath();
         if (exe is null) { status = TreeStatus.Unsupported; return new List<string>(); }
 
-        var psi = new ProcessStartInfo
+        // 共用 Core 的 UTF-8 列表解析、并发管道读取和取消清理。
+        // Folder=+ 必须保留，否则空文件夹会被误画成文件。
+        try
         {
-            FileName = exe,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        };
-        psi.ArgumentList.Add("l");
-        psi.ArgumentList.Add("-slt");
-        psi.ArgumentList.Add("-bd");
-        psi.ArgumentList.Add(path);
-
-        using var p = Process.Start(psi);
-        if (p is null) { status = TreeStatus.Error; return new List<string>(); }
-
-        var sb = new StringBuilder();
-        p.OutputDataReceived += (_, e) => { if (e.Data is not null) sb.AppendLine(e.Data); };
-        p.BeginOutputReadLine();
-
-        if (!p.WaitForExit(TimeoutMs))
+            var entries = new ZipContext.Core.SevenZipService(exe)
+                .ListAsync(path, ct: budget.Token, maxEntries: PreviewBudget.MaxEntries,
+                    maxOutputChars: PreviewBudget.MaxOutputChars).GetAwaiter().GetResult();
+            budget.Check();
+            status = TreeStatus.Ok;
+            return entries.Select(e => e.IsFolder ? e.Path.TrimEnd('/') + "/" : e.Path).ToList();
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (ZipContext.Core.SevenZipLimitException) { throw; }
+        catch
         {
-            try { p.Kill(true); } catch { /* 杀不掉也没别的办法 */ }
-            status = TreeStatus.Timeout;
+            status = TreeStatus.Error;
             return new List<string>();
         }
-        p.WaitForExit();
-
-        var names = new List<string>();
-        foreach (var raw in sb.ToString().Split('\n'))
-        {
-            var line = raw.TrimEnd('\r');
-            if (!line.StartsWith("Path = ", StringComparison.Ordinal)) continue;
-            var v = line[7..];
-            // 跳过 7z 的头部信息块（Type/Physical Size/Headers Size... 之后的存档路径行）
-            if (v.Length == 0 || v.Trim() == path) continue;
-            if (v.StartsWith("--", StringComparison.Ordinal)) continue;
-            names.Add(v.Replace('\\', '/'));
-        }
-
-        status = TreeStatus.Ok;
-        return names;
     }
 
     /// <summary>
     /// 只走 EngineLocator（读本地指针/本机探测，微秒级、零网络）。
-    /// 这里跑在 explorer.exe 进程内且有 250ms 硬超时，绝对不能联网或起下载。
+    /// 在受控预览工作线程读取；绝对不能联网或起下载。
     /// 找不到引擎时返回 null，由调用方降级成一行提示文字。
     /// </summary>
     private static string? SevenZipPath() => ZipContext.Core.EngineLocator.Resolve("7z.exe");
@@ -184,25 +228,32 @@ internal static class ArchiveTree
         public List<Node> Children = new();
     }
 
-    private static List<Node> BuildTree(List<string> names)
+    private static List<Node> BuildTree(List<string> names, PreviewBudget budget)
     {
         var roots = new List<Node>();
         var index = new Dictionary<string, Node>(StringComparer.Ordinal);
 
+        var chars = 0;
         foreach (var full in names)
         {
+            budget.Check();
+            if (full.Length > PreviewBudget.MaxPathChars || (chars += full.Length) > PreviewBudget.MaxNameChars)
+                throw new PreviewLimitException();
             var parts = full.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length > PreviewBudget.MaxPathDepth) throw new PreviewLimitException();
             if (parts.Length == 0) continue;
 
             var bucket = roots;
             var acc = "";
             for (int i = 0; i < parts.Length; i++)
             {
+                budget.Check();
                 acc = acc.Length == 0 ? parts[i] : acc + "/" + parts[i];
                 var isDir = i < parts.Length - 1 || full.EndsWith('/');
 
                 if (!index.TryGetValue(acc, out var node))
                 {
+                    if (index.Count >= PreviewBudget.MaxNodes) throw new PreviewLimitException();
                     node = new Node { Name = parts[i], IsDir = isDir };
                     index[acc] = node;
                     bucket.Add(node);
@@ -216,16 +267,24 @@ internal static class ArchiveTree
     }
 
     /// <summary>根目录最多显示多少条（防超大包把菜单撑到屏幕外）。</summary>
-    private static List<TreeLine> Render(List<Node> roots)
+    private static List<TreeLine> Render(List<Node> roots, PreviewBudget budget)
     {
         // 默认规则（2026-11-10 实测定下来的，可被 7zipContext.ini 覆盖）：
         //   根目录 → 文件夹 + 文件全部显示，文件夹在前、同类按名称升序
         //   子层   → 只展开文件夹，每个文件夹只给前 3 个，不再往下递归
         var s = PreviewSettings.Current;
+        budget.Check();
         var lines = new List<TreeLine>();
+        void Add(TreeLine line)
+        {
+            budget.Check();
+            if (lines.Count >= PreviewBudget.MaxLines) throw new PreviewLimitException();
+            lines.Add(line);
+        }
 
         void Walk(List<Node> nodes, int depth)
         {
+            budget.Check();
             if (depth > s.MaxDepth) return;
 
             var limit = depth == 0
@@ -234,12 +293,13 @@ internal static class ArchiveTree
             if (limit <= 0) return;
 
             var taken = 0;
-            foreach (var n in Sorted(nodes))
+            foreach (var n in Sorted(nodes, budget))
             {
+                budget.Check();
                 if (taken >= limit) break;
                 if (depth >= 1 && !n.IsDir && !s.ShowFilesInSubfolders) continue;
 
-                lines.Add(new TreeLine(depth, n.Name, n.IsDir));
+                Add(new TreeLine(depth, n.Name, n.IsDir));
                 taken++;
 
                 // 子项必须紧跟在自己的父文件夹后面（保持层级直觉），
@@ -248,14 +308,18 @@ internal static class ArchiveTree
             }
 
             if (depth == 0 && taken < nodes.Count)
-                lines.Add(new TreeLine(0, $"…另有 {nodes.Count - taken} 项", false));
+                Add(new TreeLine(0, $"…另有 {nodes.Count - taken} 项", false));
         }
 
         Walk(roots, 0);
         return lines;
     }
 
-    private static IEnumerable<Node> Sorted(List<Node> nodes) =>
-        nodes.OrderByDescending(n => n.IsDir)
-             .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase);
+    private static IEnumerable<Node> Sorted(List<Node> nodes, PreviewBudget budget) =>
+        nodes.OrderBy(n => n, Comparer<Node>.Create((a, b) =>
+        {
+            budget.Check();
+            if (a.IsDir != b.IsDir) return a.IsDir ? -1 : 1;
+            return StringComparer.OrdinalIgnoreCase.Compare(a.Name, b.Name);
+        }));
 }

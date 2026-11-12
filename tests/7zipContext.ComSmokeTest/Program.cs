@@ -5,7 +5,7 @@ using ZipContext.Shell;
 namespace ZipContext.ComSmokeTest;
 
 // 7zipContext 右键动词冒烟测试（进程内 + CLI 端到端）：
-//   直接实例化 7 个 IExplorerCommand 动词类，覆盖 Explorer 菜单构建的同款调用：
+//   直接实例化 8 个 IExplorerCommand 动词类，覆盖 Explorer 菜单构建的同款调用：
 //   GetState / GetTitle / GetIcon / Invoke
 // 重点回归：Win11 新菜单「空选中项快速查询」不得返回 ECS_HIDDEN（曾导致新版菜单完全不显示）。
 // 说明：CoCreateInstance 跨进程激活无法在沙箱测试进程中完成（SCM 拉起被拦截，0x80080005）；
@@ -16,6 +16,7 @@ internal static class Program
     private const uint ECS_ENABLED = 0, ECS_HIDDEN = 2;
 
     private static int _passed, _failed;
+    private static readonly NativeResources Resources = new();
 
     private static void Check(string name, bool ok, string? detail = null)
     {
@@ -38,13 +39,13 @@ internal static class Program
     {
         var riidItem = new Guid(ComInterop.IID_IShellItem);
         var hr = SHCreateItemFromParsingName(path, IntPtr.Zero, ref riidItem, out var ppsi);
-        if (hr != 0) Marshal.ThrowExceptionForHR(hr);
+        if (hr != 0) { if(ppsi!=IntPtr.Zero) Marshal.Release(ppsi); Marshal.ThrowExceptionForHR(hr); }
         try
         {
             var riidArr = new Guid(ComInterop.IID_IShellItemArray);
             hr = SHCreateShellItemArrayFromShellItem(ppsi, ref riidArr, out var ppsa);
-            if (hr != 0) Marshal.ThrowExceptionForHR(hr);
-            return (ComInterop.IShellItemArray)Marshal.GetObjectForIUnknown(ppsa);
+            if (hr != 0) { if(ppsa!=IntPtr.Zero) Marshal.Release(ppsa); Marshal.ThrowExceptionForHR(hr); }
+            try { return Resources.Rcw<ComInterop.IShellItemArray>(ppsa); } finally { if(ppsa!=IntPtr.Zero) Marshal.Release(ppsa); }
         }
         finally { Marshal.Release(ppsi); }
     }
@@ -52,9 +53,7 @@ internal static class Program
     private static string? CoTaskMemToStringAndFree(IntPtr p)
     {
         if (p == IntPtr.Zero) return null;
-        var s = Marshal.PtrToStringUni(p);
-        CoTaskMemFree(p);
-        return s;
+        try { return Marshal.PtrToStringUni(p); } finally { CoTaskMemFree(p); }
     }
 
     private static string FindDist()
@@ -80,41 +79,10 @@ internal static class Program
         return cond();
     }
 
-    /// <summary>把 Stream 适配成 ComTypes.IStream（预览处理器流初始化用）。</summary>
-    private sealed class ComStreamAdapter : System.Runtime.InteropServices.ComTypes.IStream
-    {
-        private readonly Stream _inner;
-        public ComStreamAdapter(Stream inner) => _inner = inner;
-
-        public void Read(byte[] pv, int cb, IntPtr pcbRead)
-        {
-            var n = _inner.Read(pv, 0, cb);
-            if (pcbRead != IntPtr.Zero) Marshal.WriteInt32(pcbRead, n);
-        }
-
-        public void Write(byte[] pv, int cb, IntPtr pcbWritten) { throw new NotSupportedException(); }
-        public void Seek(long dlibMove, int dwOrigin, IntPtr plibNewPosition)
-        {
-            var pos = _inner.Seek(dlibMove, (SeekOrigin)dwOrigin);
-            if (plibNewPosition != IntPtr.Zero) Marshal.WriteInt64(plibNewPosition, pos);
-        }
-        public void SetSize(long libNewSize) { throw new NotSupportedException(); }
-        public void CopyTo(System.Runtime.InteropServices.ComTypes.IStream pstm, long cb, IntPtr pcbRead, IntPtr pcbWritten) { throw new NotSupportedException(); }
-        public void Commit(int grfCommitFlags) { }
-        public void Revert() { throw new NotSupportedException(); }
-        public void LockRegion(long libOffset, long cb, int dwLockType) { }
-        public void UnlockRegion(long libOffset, long cb, int dwLockType) { }
-        public void Stat(out System.Runtime.InteropServices.ComTypes.STATSTG pstatstg, int grfStatFlag)
-        {
-            pstatstg = default;
-            pstatstg.cbSize = _inner.Length;
-        }
-        public void Clone(out System.Runtime.InteropServices.ComTypes.IStream ppstm) { throw new NotSupportedException(); }
-    }
-
     [STAThread]
     private static int Main()
     {
+        using var resources = Resources;
         var dist = FindDist();
         Console.WriteLine($"dist: {dist}");
         var work = Path.Combine(Path.GetTempPath(), "7zipContext-verb-" + Guid.NewGuid().ToString("N")[..8]);
@@ -170,7 +138,7 @@ internal static class Program
             ("OpenWithSevenZip",  true,  true,  true,  "7-Zip"),
         };
 
-        Console.WriteLine("\n[1] 动词实例化（7 个 IExplorerCommand 类）");
+        Console.WriteLine("\n[1] 动词实例化（8 个 IExplorerCommand 类）");
         var commands = new Dictionary<string, ComInterop.IExplorerCommand>();
         foreach (var (clsid, type) in VerbClsids.Map)
         {

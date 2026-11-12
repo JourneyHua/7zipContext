@@ -4,7 +4,7 @@ namespace ZipContext.Core;
 
 /// <summary>
 /// 压缩包识别规则（dist\7zipContext.ini 的 [archive] 段）。
-/// 目标：以后遇到奇怪分卷名只改配置，不改代码。
+/// 已验证分卷格式的入口可配置；未知格式不猜测解压入口，使用独立打开动词。
 /// 菜单路径允许读本地 ini；这里零网络、零子进程。
 /// </summary>
 public sealed class ArchiveRules
@@ -17,8 +17,8 @@ public sealed class ArchiveRules
 
     public ArchiveRules()
     {
-        SplitFirstSuffixes = ParseSuffixes(DefaultSplitFirstSuffixes, DefaultSplitFirstSuffixes);
-        SplitLaterSuffixes = ParseSuffixes(DefaultSplitLaterSuffixes, DefaultSplitLaterSuffixes);
+        SplitFirstSuffixes = new HashSet<string>(SettingsDocument.ParseSuffixList(DefaultSplitFirstSuffixes), StringComparer.OrdinalIgnoreCase);
+        SplitLaterSuffixes = new HashSet<string>(SettingsDocument.ParseSuffixList(DefaultSplitLaterSuffixes), StringComparer.OrdinalIgnoreCase);
     }
 
     private static ArchiveRules _cached = new();
@@ -32,7 +32,11 @@ public sealed class ArchiveRules
             try
             {
                 var p = IniPath;
-                if (p is null || !File.Exists(p)) return _cached;
+                if (p is null || !File.Exists(p))
+                {
+                    _cachedStamp = DateTime.MinValue;
+                    return _cached = new ArchiveRules();
+                }
 
                 var stamp = File.GetLastWriteTimeUtc(p);
                 if (stamp == _cachedStamp) return _cached;
@@ -66,67 +70,14 @@ public sealed class ArchiveRules
 
     private static ArchiveRules Parse(string path)
     {
-        var rules = new ArchiveRules();
-        var section = "";
-        var firstRaw = DefaultSplitFirstSuffixes;
-        var laterRaw = DefaultSplitLaterSuffixes;
-        var openWith = "1";
-
-        foreach (var raw in File.ReadAllLines(path))
+        var settings = SettingsDocument.Load(path);
+        return new ArchiveRules
         {
-            var line = raw.Trim();
-            if (line.Length == 0 || line.StartsWith(';') || line.StartsWith('#')) continue;
-            if (line.StartsWith('[') && line.EndsWith(']'))
-            {
-                section = line[1..^1].Trim();
-                continue;
-            }
-            if (!section.Equals("archive", StringComparison.OrdinalIgnoreCase)) continue;
-
-            var eq = line.IndexOf('=');
-            if (eq <= 0) continue;
-            var key = line[..eq].Trim().ToLowerInvariant();
-            var val = line[(eq + 1)..].Trim();
-            switch (key)
-            {
-                case "splitfirstsuffixes":
-                case "splitfirst":
-                    firstRaw = val;
-                    break;
-                case "splitlatersuffixes":
-                case "splitlater":
-                    laterRaw = val;
-                    break;
-                case "openwithsevenzip":
-                    openWith = val;
-                    break;
-            }
-        }
-
-        rules.SplitFirstSuffixes = ParseSuffixes(firstRaw, DefaultSplitFirstSuffixes);
-        rules.SplitLaterSuffixes = ParseSuffixes(laterRaw, DefaultSplitLaterSuffixes);
-        rules.OpenWithSevenZip = openWith is "1" or "true" or "yes" or "on";
-        return rules;
+            SplitFirstSuffixes = new HashSet<string>(SettingsDocument.ParseSuffixList(settings.SplitFirstSuffixes), StringComparer.OrdinalIgnoreCase),
+            SplitLaterSuffixes = new HashSet<string>(SettingsDocument.ParseSuffixList(settings.SplitLaterSuffixes), StringComparer.OrdinalIgnoreCase),
+            OpenWithSevenZip = settings.OpenWithSevenZip,
+        };
     }
-
-    private static HashSet<string> ParseSuffixes(string raw, string fallback)
-    {
-        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var part in raw.Split(new[] { ',', ';', ' ', '\t', '\r', '\n' },
-                     StringSplitOptions.RemoveEmptyEntries))
-        {
-            var suffix = part.Trim();
-            if (suffix.Length == 0) continue;
-            if (!suffix.StartsWith('.')) suffix = "." + suffix;
-            set.Add(suffix);
-        }
-        if (set.Count > 0) return set;
-
-        foreach (var part in fallback.Split(',', StringSplitOptions.RemoveEmptyEntries))
-            set.Add(part.Trim());
-        return set;
-    }
-
     /// <summary>把配置序列化回 ini 值形式，供设置面板显示/保存。</summary>
     public string SplitFirstValue => string.Join(",", SplitFirstSuffixes);
     public string SplitLaterValue => string.Join(",", SplitLaterSuffixes);
@@ -137,14 +88,15 @@ public static class SplitVolumeNames
 {
     // .001 / .z01 / .part1.rar 都能拆成 prefix + 序号 + tail
     private static readonly Regex NumberedSuffix = new(
-        @"^(?<prefix>.*?)(?<number>\d{1,6})(?<tail>[^0-9]*)$",
+        @"^(?<prefix>.*?)(?<number>[0-9]+)(?<tail>[^0-9]*)$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static bool HasSuffix(string path, HashSet<string> suffixes) =>
         suffixes.Any(s => path.EndsWith(s, StringComparison.OrdinalIgnoreCase));
 
     public static string? MatchSuffix(string path, HashSet<string> suffixes) =>
-        suffixes.FirstOrDefault(s => path.EndsWith(s, StringComparison.OrdinalIgnoreCase));
+        suffixes.OrderByDescending(s => s.Length)
+            .FirstOrDefault(s => path.EndsWith(s, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>去掉分卷后缀，得到同组基础名（不含 .001/.z01/.part1.rar）。</summary>
     public static string StripSplitSuffix(string path, HashSet<string> suffixes)
@@ -153,46 +105,84 @@ public static class SplitVolumeNames
         return suffix is null ? path : path[..^suffix.Length];
     }
 
-    /// <summary>
-    /// 取同一分卷组的已存在文件。支持：
-    ///   1) 配置里的后续后缀（base + .002 / base + .z02）
-    ///   2) 首卷后缀带序号时自动递增（.001→.002→.003，.part1.rar→.part2.rar）
-    /// </summary>
+    public sealed record DeletionPlan(IReadOnlyList<string> Files, bool CanDelete, string? Reason);
+
+    /// <summary>按同一编号家族找文件；真正删除前必须另查 DeletionPlan.CanDelete。</summary>
     public static IReadOnlyList<string> GroupFiles(string firstPath,
+        HashSet<string> firstSuffixes, HashSet<string> laterSuffixes) =>
+        PlanDeletion(firstPath, firstSuffixes, laterSuffixes).Files;
+
+    /// <summary>未知命名、编号空缺或传统分卷 ZIP 均拒绝自动删除，不跨家族拼接后缀。</summary>
+    public static DeletionPlan PlanDeletion(string firstPath,
         HashSet<string> firstSuffixes, HashSet<string> laterSuffixes)
     {
         var first = Path.GetFullPath(firstPath);
         var firstSuffix = MatchSuffix(first, firstSuffixes);
-        if (firstSuffix is null) return new[] { first };
-
-        var dir = Path.GetDirectoryName(first) ?? "";
-        var baseName = Path.GetFileName(first[..^firstSuffix.Length]);
-        var files = new List<string> { first };
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { first };
-
-        void Add(string candidate)
+        // 删除保护不依赖用户是否启用了常见格式的菜单入口。
+        if (firstSuffix is null)
         {
-            if (seen.Add(candidate) && File.Exists(candidate)) files.Add(candidate);
+            var conventional = Regex.Match(Path.GetFileName(first),
+                @"(?<suffix>\.(?:[0-9]+|z[0-9]+|part[0-9]+\.rar))$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (conventional.Success) firstSuffix = conventional.Groups["suffix"].Value;
         }
-
-        foreach (var laterSuffix in laterSuffixes)
-            Add(Path.Combine(dir, baseName + laterSuffix));
-
-        var match = NumberedSuffix.Match(firstSuffix);
-        if (match.Success && int.TryParse(match.Groups["number"].Value, out var start))
+        var single = new[] { first };
+        DeletionPlan Deny(string reason) => new(single, false, reason);
+        try
         {
+            if (!File.Exists(first)) return Deny("源文件已不存在");
+            var dir = Path.GetDirectoryName(first)!;
+            if (firstSuffix is null)
+            {
+                if (HasSuffix(first, laterSuffixes)) return Deny("所选文件是后续卷");
+                // 传统 ZIP 从末尾 .zip 打开；旧式 RAR 从 .rar 打开，尚无实际用卷清单。
+                var ext = Path.GetExtension(first);
+                var stem = Path.GetFileNameWithoutExtension(first);
+                if ((ext.Equals(".zip", StringComparison.OrdinalIgnoreCase) ||
+                     ext.Equals(".rar", StringComparison.OrdinalIgnoreCase)) &&
+                    Directory.EnumerateFiles(dir).Any(p => Regex.IsMatch(Path.GetFileName(p),
+                        "^" + Regex.Escape(stem) +
+                        (ext.Equals(".zip", StringComparison.OrdinalIgnoreCase) ? @"\.z[0-9]+$" : @"\.r[0-9]+$"),
+                        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)))
+                    return Deny("检测到传统分卷，无法可靠确认实际使用的全部卷");
+                return new(single, true, null);
+            }
+
+            var match = NumberedSuffix.Match(firstSuffix);
+            if (!match.Success || !long.TryParse(match.Groups["number"].Value, out var start) || start != 1)
+                return Deny("分卷命名没有受支持的首卷编号");
+            var baseName = Path.GetFileName(first[..^firstSuffix.Length]);
             var width = match.Groups["number"].Value.Length;
             var prefix = match.Groups["prefix"].Value;
             var tail = match.Groups["tail"].Value;
-            for (var i = start + 1; i < start + 1000; i++)
+            var family = new Regex("^" + Regex.Escape(baseName + prefix) +
+                @"(?<number>[0-9]+)" + Regex.Escape(tail) + "$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            var numbered = new SortedDictionary<long, string>();
+            var ambiguous = false;
+            foreach (var path in Directory.EnumerateFiles(dir))
             {
-                var candidate = Path.Combine(dir,
-                    baseName + prefix + i.ToString().PadLeft(width, '0') + tail);
-                if (!File.Exists(candidate)) break;
-                Add(candidate);
+                var item = family.Match(Path.GetFileName(path));
+                if (!item.Success) continue;
+                var digits = item.Groups["number"].Value;
+                if (!long.TryParse(digits, out var number) || number < start ||
+                    digits != number.ToString(System.Globalization.CultureInfo.InvariantCulture).PadLeft(width, '0') ||
+                    !numbered.TryAdd(number, path)) ambiguous = true;
             }
+            var files = numbered.Values.ToArray();
+            var contiguous = numbered.Count > 0 && numbered.Keys.First() == start &&
+                numbered.Keys.Last() - start == numbered.Count - 1;
+            var known = firstSuffix.Equals(".001", StringComparison.OrdinalIgnoreCase) ||
+                (prefix.Equals(".part", StringComparison.OrdinalIgnoreCase) &&
+                 tail.Equals(".rar", StringComparison.OrdinalIgnoreCase));
+            var reason = ambiguous ? "分卷编号存在重复或不一致的补零方式" :
+                !contiguous ? "分卷编号不连续" :
+                !known ? "该分卷格式尚不能可靠确认删除范围（含传统分卷 ZIP 和自定义格式）" : null;
+            return new(files, reason is null, reason);
         }
-
-        return files;
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return Deny("无法检查完整分卷组：" + ex.Message);
+        }
     }
 }

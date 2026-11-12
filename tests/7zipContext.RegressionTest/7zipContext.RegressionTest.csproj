@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\7zipContext.SmokeTest\TraditionalZipFixture.cs" Link="TraditionalZipFixture.cs" />
+    <ProjectReference Include="..\..\src\7zipContext.App\7zipContext.App.csproj" />
+    <ProjectReference Include="..\..\src\7zipContext.Classic\7zipContext.Classic.csproj" />
+    <ProjectReference Include="..\..\src\7zipContext.Setup\7zipContext.Setup.csproj" />
+  </ItemGroup>
+  <ItemGroup><Compile Include="..\NativeResources.cs" Link="NativeResources.cs" /></ItemGroup>
+</Project>

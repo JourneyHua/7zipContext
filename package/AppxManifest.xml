@@ -15,7 +15,7 @@
   <Properties>
     <DisplayName>7zipContext</DisplayName>
     <PublisherDisplayName>7zipContext</PublisherDisplayName>
-    <Logo>logo.png</Logo>
+    <Logo>StoreLogo.png</Logo>
   </Properties>
 
   <Dependencies>
@@ -38,7 +38,7 @@
                           BackgroundColor="transparent" />
       <Extensions>
 
-        <!-- COM 服务器：7 个 IExplorerCommand 动词（预览已迁到 7zipContext.Classic）。
+        <!-- COM 服务器：8 个 IExplorerCommand 动词（预览已迁到 7zipContext.Classic）。
              SurrogateServer = 系统 dllhost.exe 承载托管 comhost.dll（PowerToys 同款架构）。
              所有 CCW 交互发生在 dllhost 进程内，跨进程边界由系统原生 COM 处理。
              （自有 exe 的 LocalServer 外进程方案：.NET 托管 CCW 跨进程派发失效，已弃用） -->

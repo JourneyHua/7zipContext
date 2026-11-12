@@ -1,10 +1,11 @@
+using System.IO;
 using Microsoft.Win32;
 
 namespace ZipContext.App.ShellIntegration;
 
 /// <summary>
-/// v2 起 7zipContext 只做右键菜单：**不注册文件关联、不注册预览窗格**。
-/// 本类唯一职责是把 v1 残留（注册表动词 / IPreviewHandler / ProgId 关联）清干净——
+/// 清理 v1 残留并注册可选的 7-Zip 打开方式，不改变用户的默认程序。
+/// v1 残留包含注册表动词、IPreviewHandler 和旧 ProgId——
 /// 老版本装过的机器，光删代码是清不掉的，必须靠这里。
 /// 菜单动词由 AppX 包（7zipContext.Shell）提供，经典菜单由 7zipContext.Classic 提供。
 /// </summary>
@@ -12,7 +13,7 @@ public static class ShellIntegration
 {
     private const string ProgIdPrefix = "7zipContext";
 
-    /// <summary>交给 7-Zip 文件管理器（7zFM.exe）接管的扩展名。</summary>
+    /// <summary>为 7-Zip 文件管理器（7zFM.exe）注册可选打开方式的扩展名。</summary>
     private static readonly string[] DefaultExtensions = { ".zip", ".7z", ".rar" };
 
     /// <summary>v1 的预览窗格处理器 CLSID 与 ShellEx 接口 IID（仅用于清理）。</summary>
@@ -30,14 +31,21 @@ public static class ShellIntegration
     /// <summary>安装时清理 v1 残留（重装/升级老版本都走这里），并把 7zFM 注册成打开方式。</summary>
     public static void Install()
     {
+        using var deployment = ZipContext.Deployment.DeploymentLease.Acquire(ZipContext.Core.EngineLocator.ConfigRoot,
+            Environment.GetEnvironmentVariable(ZipContext.Deployment.DeploymentLease.EnvironmentName));
+        using var gate = EngineOperationLock.Acquire(ZipContext.Core.EngineLocator.ConfigRoot);
+        ZipContext.Core.EngineLocator.InvalidateCache();
         CleanupAll();
-        RegisterDefaults();
+        RegisterOpenWith();
         NotifyShellChanged();
     }
 
     /// <summary>卸载时同样清一遍，保证 0 残留。</summary>
     public static void Uninstall()
     {
+        using var deployment = ZipContext.Deployment.DeploymentLease.Acquire(ZipContext.Core.EngineLocator.ConfigRoot,
+            Environment.GetEnvironmentVariable(ZipContext.Deployment.DeploymentLease.EnvironmentName));
+        using var gate = EngineOperationLock.Acquire(ZipContext.Core.EngineLocator.ConfigRoot);
         CleanupAll();
         NotifyShellChanged();
     }
@@ -49,29 +57,37 @@ public static class ShellIntegration
         CleanupLegacyAssociations();
     }
 
-    // ---------- 默认打开方式：交给 7zFM.exe ----------
+    // ---------- 可选打开方式：7zFM.exe ----------
 
     /// <summary>
     /// 7zFM.exe 来自安装阶段解析出的引擎目录（本机已有或下载解包）。
-    /// 引擎缺失时返回 null，RegisterDefaults 会跳过注册而不是写一条死路径。
+    /// 引擎缺失时返回 null，RegisterOpenWith 会跳过注册而不是写一条死路径。
     /// </summary>
     private static string? SevenZipFileManager =>
         ZipContext.Core.EngineLocator.Resolve("7zFM.exe");
 
     /// <summary>
-    /// 把 .zip/.7z/.rar 注册到 7-Zip 文件管理器。
-    /// 注意 Windows 的限制：Win10+ 的默认程序由 UserChoice 哈希保护，
-    /// 程序**无法静默**改成默认。这里只能做到三件事：
-    ///   1) 写入 ProgId 与 open 命令（打开方式列表里出现）
-    ///   2) 写 OpenWithProgids（"选择其他应用"里可见）
-    ///   3) 尝试把类默认值指向我们（仅对没有 UserChoice 的类型生效）
-    /// 真正的"始终使用"必须用户自己在系统「默认应用」里点一次（见 --defaults）。
+    /// 为 .zip/.7z/.rar 注册 ProgId 和 OpenWithProgids，使 7-Zip 可供选择。
+    /// 不写扩展名默认值，也不删除 UserChoice；默认应用由用户在系统设置选择。
     /// </summary>
-    private static void RegisterDefaults()
+    private static void RegisterOpenWith()
     {
         var fm = SevenZipFileManager;
         if (fm is null) return;   // 引擎未就绪：不写死路径，等下次 install 再注册
+        RegisterOpenWithPath(fm);
+    }
 
+    /// <summary>调用者持有引擎锁；只刷新可选打开方式，不做清理或更改默认程序。</summary>
+    internal static void RefreshOpenWithForEngine(string directory)
+    {
+        if (!ZipContext.Core.EngineLocator.IsUsable(directory))
+            throw new IOException("引擎目录不完整，不能刷新打开方式。");
+        RegisterOpenWithPath(Path.Combine(directory, "7zFM.exe"));
+        NotifyShellChanged();
+    }
+
+    private static void RegisterOpenWithPath(string fm)
+    {
         foreach (var ext in DefaultExtensions)
         {
             var progId = $"{ProgIdPrefix}{ext}";
@@ -88,34 +104,7 @@ public static class ShellIntegration
             using (var k = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{ext}\OpenWithProgids"))
                 k.SetValue(progId, Array.Empty<byte>(), RegistryValueKind.None);
 
-            // 尽力而为：没有 UserChoice 的类型会真的生效
-            try
-            {
-                using var cls = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{ext}");
-                cls.SetValue("", progId);
-            }
-            catch { }
-
-            // Windows 只保护「写」UserChoice（哈希校验），「删」是允许的。
-            // 删掉后系统回落到类默认值 → 上面写的 progId 生效。
-            // 不清掉的话，用户只要之前手动选过别的程序，我们的设置永远不起作用。
-            TryClearUserChoice(ext);
         }
-    }
-
-    /// <summary>
-    /// 删掉文件类型的 UserChoice，让系统回落到 `Software\Classes\{ext}` 的默认值。
-    /// 失败不要紧（有 ACL 保护时），此时只能靠用户去「默认应用」手动点。
-    /// </summary>
-    private static void TryClearUserChoice(string ext)
-    {
-        try
-        {
-            Registry.CurrentUser.DeleteSubKeyTree(
-                $@"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\UserChoice",
-                throwOnMissingSubKey: false);
-        }
-        catch { /* ACL 拒绝就放弃，不阻断安装 */ }
     }
 
     /// <summary>打开系统「默认应用」设置页，让用户点一次"始终使用"。</summary>

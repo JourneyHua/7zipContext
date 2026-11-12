@@ -176,20 +176,27 @@ internal static class MenuLive
 
     public static void Run(string zipPath, string? outPng, int? invokeIndex, Action<string> log)
     {
-        if (SHParseDisplayName(zipPath, IntPtr.Zero, out var pidl, 0, out _) != 0) { log("parse failed"); return; }
+        using var resources = new NativeResources();
+        var parseHr = SHParseDisplayName(zipPath, IntPtr.Zero, out var pidl, 0, out _);
+        resources.Pidl(pidl);
+        if (parseHr != 0) { log("parse failed"); return; }
         var iidFolder = IID_IShellFolder;
-        if (SHBindToParent(pidl, ref iidFolder, out var psfPtr, out var pidlChild) != 0) { log("bind failed"); return; }
-        var folder = (IShellFolder)Marshal.GetObjectForIUnknown(psfPtr);
-        Marshal.Release(psfPtr);
-        var apidl = Marshal.AllocHGlobal(IntPtr.Size);
+        var bindHr = SHBindToParent(pidl, ref iidFolder, out var psfPtr, out var pidlChild);
+        resources.ComPointer(psfPtr);
+        if (bindHr != 0) { log("bind failed"); return; }
+        var folder = resources.Rcw<IShellFolder>(psfPtr);
+        resources.Release(psfPtr);
+        var apidl = resources.Allocate(IntPtr.Size);
         Marshal.WriteIntPtr(apidl, pidlChild);
         var iidCm = IID_IContextMenu;
-        if (folder.GetUIObjectOf(IntPtr.Zero, 1, apidl, ref iidCm, IntPtr.Zero, out var pcm) != 0) { log("GetUIObjectOf failed"); return; }
-        Marshal.FreeHGlobal(apidl);
-        var cm = (IContextMenu)Marshal.GetObjectForIUnknown(pcm);
-        Marshal.Release(pcm);
+        var objectHr = folder.GetUIObjectOf(IntPtr.Zero, 1, apidl, ref iidCm, IntPtr.Zero, out var pcm);
+        resources.ComPointer(pcm);
+        if (objectHr != 0) { log("GetUIObjectOf failed"); return; }
+        resources.FreeHGlobal(apidl);
+        var cm = resources.Rcw<IContextMenu>(pcm);
+        resources.Release(pcm);
 
-        var hMenu = CreatePopupMenu();
+        var hMenu = resources.Menu(CreatePopupMenu());
         var qhr = cm.QueryContextMenu(hMenu, 0, 1, 0x7FFF, 0);
         log($"QueryContextMenu hr=0x{qhr:X8} count={GetMenuItemCount(hMenu)}");
 
@@ -211,7 +218,7 @@ internal static class MenuLive
         form.Activate();
         SetForegroundWindow(form.Handle);
 
-        var timer = new System.Threading.Timer(_ =>
+        using var timer = new DrainingTimer(_ =>
         {
             PostMessageW(form.Handle, WM_APP_DUMP, IntPtr.Zero, IntPtr.Zero);
             if (invokeIndex is int idx)
@@ -219,7 +226,7 @@ internal static class MenuLive
                 Thread.Sleep(400);
                 PostMessageW(form.Handle, WM_APP_INVOKE, (IntPtr)idx, IntPtr.Zero);
                 Thread.Sleep(3500);
-                form.Invoke(() => form.ListZipContextWindows());
+                form.BeginInvoke(() => form.ListZipContextWindows());
                 PostMessageW(form.Handle, 0x001F, IntPtr.Zero, IntPtr.Zero);
             }
             else
@@ -231,8 +238,8 @@ internal static class MenuLive
 
         TrackPopupMenuEx(hMenu, 0x0100, 60, 60, form.Handle, IntPtr.Zero);
         timer.Dispose();
-        Marshal.ReleaseComObject(cm);
-        Marshal.ReleaseComObject(folder);
+        resources.ReleaseComObject(cm);
+        resources.ReleaseComObject(folder);
         form.Close();
         log("MENU CLOSED");
     }

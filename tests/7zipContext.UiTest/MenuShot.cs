@@ -55,27 +55,32 @@ internal static class MenuShot
         [PreserveSig] int GetCommandString(int idCmd, uint uType, IntPtr pReserved, IntPtr pszName, int cchMax);
     }
 
-    private static IntPtr BuildMenu(string zipPath, out IContextMenu? cm, out IShellFolder? folder)
+    private static IntPtr BuildMenu(NativeResources resources, string zipPath, out IContextMenu? cm, out IShellFolder? folder)
     {
         cm = null;
         folder = null;
-        if (SHParseDisplayName(zipPath, IntPtr.Zero, out var pidl, 0, out _) != 0) return IntPtr.Zero;
+        var parseHr = SHParseDisplayName(zipPath, IntPtr.Zero, out var pidl, 0, out _);
+        resources.Pidl(pidl);
+        if (parseHr != 0) return IntPtr.Zero;
         var iidFolder = IID_IShellFolder;
-        if (SHBindToParent(pidl, ref iidFolder, out var psfPtr, out var pidlChild) != 0) return IntPtr.Zero;
-        folder = (IShellFolder)Marshal.GetObjectForIUnknown(psfPtr);
-        Marshal.Release(psfPtr);
+        var bindHr = SHBindToParent(pidl, ref iidFolder, out var psfPtr, out var pidlChild);
+        resources.ComPointer(psfPtr);
+        if (bindHr != 0) return IntPtr.Zero;
+        folder = resources.Rcw<IShellFolder>(psfPtr);
+        resources.Release(psfPtr);
 
-        var apidl = Marshal.AllocHGlobal(IntPtr.Size);
+        var apidl = resources.Allocate(IntPtr.Size);
         Marshal.WriteIntPtr(apidl, pidlChild);
         var iidCm = IID_IContextMenu;
         var hr = folder.GetUIObjectOf(IntPtr.Zero, 1, apidl, ref iidCm, IntPtr.Zero, out var pcm);
-        Marshal.FreeHGlobal(apidl);
+        resources.ComPointer(pcm);
+        resources.FreeHGlobal(apidl);
         if (hr != 0) return IntPtr.Zero;
 
-        cm = (IContextMenu)Marshal.GetObjectForIUnknown(pcm);
-        Marshal.Release(pcm);
+        cm = resources.Rcw<IContextMenu>(pcm);
+        resources.Release(pcm);
 
-        var hMenu = CreatePopupMenu();
+        var hMenu = resources.Menu(CreatePopupMenu());
         cm.QueryContextMenu(hMenu, 0, 1, 0x7FFF, 0);
         return hMenu;
     }
@@ -83,7 +88,8 @@ internal static class MenuShot
     /// <summary>显示菜单 → 截屏 → 关闭菜单。</summary>
     public static void ShowAndCapture(string zipPath, string outPng, Action<string> log)
     {
-        var hMenu = BuildMenu(zipPath, out var cm, out var folder);
+        using var resources = new NativeResources();
+        var hMenu = BuildMenu(resources, zipPath, out var cm, out var folder);
         if (hMenu == IntPtr.Zero) { log("build menu failed"); return; }
 
         using var form = new Form
@@ -101,8 +107,8 @@ internal static class MenuShot
         SetForegroundWindow(form.Handle);
         log($"host hwnd={form.Handle}");
 
-        var done = new ManualResetEventSlim();
-        var timer = new System.Threading.Timer(_ =>
+        using var done = new ManualResetEventSlim();
+        using var timer = new DrainingTimer(_ =>
         {
             try
             {
@@ -126,8 +132,8 @@ internal static class MenuShot
         done.Wait(3000);
         timer.Dispose();
 
-        if (cm is not null) Marshal.ReleaseComObject(cm);
-        if (folder is not null) Marshal.ReleaseComObject(folder);
+        if (cm is not null) resources.ReleaseComObject(cm);
+        if (folder is not null) resources.ReleaseComObject(folder);
         form.Close();
     }
 }

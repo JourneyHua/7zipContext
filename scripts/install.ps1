@@ -6,7 +6,7 @@
 #   -SkipPublish     跳过 dotnet publish（只改了注册逻辑、重跑时装得快）
 #   -RestartExplorer 完成后自动重启资源管理器（菜单立即可见；不加则提示手动）
 #   -EnginePath      手动指定本机已有的 7-Zip 目录（离线用，需含 7z/7zG/7zFM/7z.dll）
-#   -EngineSource    自定义官方安装包下载 URL（GitHub 不可达时用）
+#   -EngineSource    已停用；传入此旧参数会在执行前报错
 #   -SkipEngineCheck 跳过「检查更新」提示（不影响引擎准备）
 #
 # 步骤：发布 → 准备 7-Zip 引擎 → 注册 Win11 新版右键菜单（AppX）
@@ -22,6 +22,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($PSBoundParameters.ContainsKey('EngineSource')) { throw '自定义下载源已停用，请使用官方源或 -EnginePath 本机离线引擎。' }
 $ProgressPreference = 'SilentlyContinue'   # 压掉 Add-AppxPackage 的部署进度刷屏
 $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root 'dist'
@@ -31,26 +32,16 @@ $exe = Join-Path $dist '7zipContext.exe'
 function Say([string]$msg, [string]$color = 'Gray') { Write-Host $msg -ForegroundColor $color }
 function Step([int]$n, [string]$msg) { Write-Host "[$n/5] $msg" -ForegroundColor Cyan }
 
-# ---- 0. 杀掉可能锁住 dist 文件的进程（COM 服务器常驻，重装必撞） ----
-Get-Process -Name '7zipContext.Shell', '7zipContext' -ErrorAction SilentlyContinue | ForEach-Object {
-    try { $_.Kill(); Say "  已停止残留进程 $($_.ProcessName) ($($_.Id))" 'DarkGray' } catch { }
-}
-# 菜单动词/预览处理器由系统 dllhost.exe 代理承载（SurrogateServer），
-# 它会加载并锁住 dist\7zipContext.Shell.dll —— 不清理就会导致 AppX 重注册报 0x80073D02（文件被占用）。
-Get-Process -Name 'dllhost' -ErrorAction SilentlyContinue | ForEach-Object {
-    try {
-        $hosting = $_.Modules | Where-Object { $_.FileName -like '*7zipContext*' }
-        if ($hosting) { $_.Kill(); Say "  已停止占用 dist 的代理宿主 dllhost ($($_.Id))" 'DarkGray' }
-    } catch { }
-}
-Start-Sleep -Milliseconds 500
-
+. (Join-Path $PSScriptRoot 'deployment.ps1')
+$deploymentContext = Enter-DeploymentLease
+$pendingPublish = $null
+try {
 # ---- 1. 发布 ----
 if ($SkipPublish) {
     Step 1 '跳过发布（-SkipPublish）'
 } else {
     Step 1 '发布 7zipContext ...'
-    & (Join-Path $root 'scripts\publish.ps1')
+    $pendingPublish = & (Join-Path $root 'scripts\publish.ps1') -KeepRollback
 }
 
 $missing = @('7zipContext.exe', '7zipContext.Shell.comhost.dll',
@@ -61,34 +52,36 @@ if ($missing.Count -gt 0) {
 }
 
 # ---- 2. 准备 7-Zip 引擎（本机已有则复用，否则联网下载并校验） ----
-# 关键：这一步必须在 --install（注册 7zFM 默认打开方式）之前，
+# 关键：这一步必须在 --install（注册 7zFM 可选打开方式）之前，
 # 且只在安装阶段联网；菜单/预览路径永远只读本地指针，绝不发网络请求。
 Step 2 '准备 7-Zip 引擎 ...'
 $engineArgs = @('--ensure-engine')
-if ($EnginePath)   { $engineArgs += @('--engine-path', $EnginePath) }
-if ($EngineSource) { $engineArgs += @('--engine-source', $EngineSource) }
+if ($EnginePath)   { $engineArgs += @('--engine-path', ('"' + ($EnginePath -replace '(\\+)$', '$1$1') + '"')) }
 
-$engineStatusPath = Join-Path $env:LOCALAPPDATA '7zipContext\last-ensure.json'
-if (Test-Path $engineStatusPath) { Remove-Item -LiteralPath $engineStatusPath -Force -ErrorAction SilentlyContinue }
+# Each request owns its result file; a second installer must not read the first one's result.
+$engineStatusPath = Join-Path ([System.IO.Path]::GetTempPath()) ('7zipContext-ensure-' + [Guid]::NewGuid().ToString('N') + '.json')
+$engineArgs += @('--status-path', ('"' + $engineStatusPath + '"'))
 $engineProc = Start-Process -FilePath $exe -ArgumentList $engineArgs -Wait -PassThru -WindowStyle Hidden
 $engineResult = $null
 if (Test-Path $engineStatusPath) {
     try { $engineResult = Get-Content -LiteralPath $engineStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
 }
-$engineReady = ($engineProc.ExitCode -eq 0) -and ($engineResult -and $engineResult.ok)
+if (Test-Path -LiteralPath $engineStatusPath) { Remove-Item -LiteralPath $engineStatusPath -Force -ErrorAction SilentlyContinue }
+$engineReady = ($engineProc.ExitCode -in @(0, 4)) -and ($engineResult -and $engineResult.ok)
 if ($engineReady) {
-    Say "  [OK] $($engineResult.message)" 'Green'
+    if ($engineProc.ExitCode -eq 4) { Say "  [WARN] $($engineResult.message)" 'Yellow' }
+    else { Say "  [OK] $($engineResult.message)" 'Green' }
 } else {
     $why = if ($engineResult -and $engineResult.message) { $engineResult.message } else { "exit=$($engineProc.ExitCode)，未产生状态文件" }
     Say "  [X] 7-Zip 引擎未就绪：$why" 'Yellow'
     Say '      菜单仍会注册，但压缩/解压不可用。可重跑：' 'Yellow'
-    Say '        install.ps1 -EnginePath <本机 7-Zip 目录>   或   -EngineSource <可达安装包 URL>' 'Yellow'
+    Say '        install.ps1 -EnginePath <本机 7-Zip 目录>' 'Yellow'
 }
 
 # 更新检查：只提示不升级，内部按「每天最多一次」节流；失败/离线绝不影响安装结果。
 if (-not $SkipEngineCheck -and $engineReady) {
     Start-Process -FilePath $exe -ArgumentList @('--check-engine-update') -Wait -WindowStyle Hidden | Out-Null
-    $checkPath = Join-Path $env:LOCALAPPDATA '7zipContext\last-update-result.json'
+    $checkPath = Join-Path $env:LOCALAPPDATA '7zipContext\last-query.json'
     if (Test-Path $checkPath) {
         try {
             $chk = Get-Content -LiteralPath $checkPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -96,6 +89,9 @@ if (-not $SkipEngineCheck -and $engineReady) {
         } catch { }
     }
 }
+
+# Stopping hosts happens only after compilation and engine preparation.
+$null = Stop-DeploymentProcesses
 
 # ---- 3. 注册 Win11 新版右键菜单（AppX loose 注册，dist 即包根） ----
 Step 3 '注册 Win11 新版右键菜单 ...'
@@ -139,13 +135,14 @@ if (-not $menuRegistered) {
 # ---- 4. 清理 v1 残留（注册表动词 / 预览窗格 / 文件关联） ----
 Step 4 '清理 v1 残留注册（动词 / 预览窗格 / 文件关联）...'
 
-# v2 只做右键菜单：不注册文件关联、不注册预览窗格，只把旧版残留清干净。
+# 清理旧版残留并注册 7zFM 可选打开方式；保留现有默认程序，不注册预览窗格。
 # WinExe 进程 $LASTEXITCODE 为空（5.1 对 GUI 程序不写），必须 -PassThru 取退出码
 $proc = Start-Process -FilePath $exe -ArgumentList @('--install') -Wait -PassThru -WindowStyle Hidden
 if ($proc.ExitCode -ne 0) {
     Say "  [X] 7zipContext.exe --install 返回失败（exit=$($proc.ExitCode)）。" 'Yellow'
+    throw '菜单注册未完成；若另一个引擎操作正在进行，请等待结束后重试。'
 } else {
-    Say '  [OK] v1 残留清理完成（v2 不再注册任何文件关联/预览窗格）' 'Green'
+    Say '  [OK] v1 残留清理完成；已添加可选打开方式，保留现有默认程序' 'Green'
 }
 New-Item 'HKCU:\Software\7zipContext' -Force | Out-Null
 New-ItemProperty 'HKCU:\Software\7zipContext' -Name 'InstallMarker' -Value 1 -Force | Out-Null
@@ -184,12 +181,12 @@ Check "7-Zip 引擎可用（四件套 $engineFiles/4）" ($engineReady -and $eng
 $pkg = Get-AppxPackage -Name $pkgName
 Check "AppX 菜单包（$pkgName）" ($menuRegistered -and $pkg -and $pkg.Status -eq 'Ok') '重跑 install 或开启开发者模式'
 
-# v1 残留必须为 0：预览窗格处理器 + 文件关联 ProgId。
-# v2 不再注册这两样，但老机器上的注册表只能靠 7zipContext.exe --install 清掉 —— 所以必须验。
+# v1 预览窗格处理器残留必须为 0。
+# 旧版预览处理器需由 7zipContext.exe --install 清理；下方另验可选打开方式。
 $previewLeft = Test-Path 'HKCU:\Software\Classes\CLSID\{B9A10010-8C3F-4A2E-9E6D-5F1A2B3C4D10}'
 Check '预览窗格处理器残留（IPreviewHandler）' (-not $previewLeft) 'v1 残留未清掉'
 
-# 默认打开方式：.zip/.7z/.rar 的 ProgId 必须指向 7zFM.exe
+# 可选打开方式：.zip/.7z/.rar 的 ProgId 必须指向 7zFM.exe
 # （Windows 不允许静默改默认程序，这里只保证「打开方式」里可用）
 $fmOk = 0
 $hkcuAssoc = [Microsoft.Win32.Registry]::CurrentUser
@@ -197,7 +194,7 @@ foreach ($ext in '.zip', '.7z', '.rar') {
     $k = $hkcuAssoc.OpenSubKey("Software\Classes\7zipContext$ext\shell\open\command")
     if ($k -and $k.GetValue('') -like '*7zFM.exe*') { $fmOk++; $k.Close() }
 }
-Check "默认打开方式已注册（7zFM $fmOk/3）" ($fmOk -eq 3) '--install 失败，或 7-Zip 引擎未就绪'
+Check "可选打开方式已注册（7zFM $fmOk/3）" ($fmOk -eq 3) '--install 失败，或 7-Zip 引擎未就绪'
 
 # comhost 真实 COM 激活（Explorer 同款路径；进程内冒烟测试覆盖不到这里）
 $comhostOk = $true
@@ -229,12 +226,7 @@ foreach ($s in '*', 'Directory', 'Directory\Background', 'DesktopBackground') {
 Check "经典菜单 handler 注册（$classicScopes/4）" `
     (($classicInproc -eq $classicComhost) -and $classicScopes -eq 4) 'scripts\7zipContext-menu.ps1 -Install 失败'
 
-$classicActive = $false
-try {
-    $t2 = [Type]::GetTypeFromCLSID([guid]'B9A10020-8C3F-4A2E-9E6D-5F1A2B3C4D20')
-    $o2 = [Activator]::CreateInstance($t2)
-    if ($o2) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($o2) | Out-Null; $classicActive = $true }
-} catch { }
+$classicActive = Test-DeploymentComActivation ([guid]'B9A10020-8C3F-4A2E-9E6D-5F1A2B3C4D20')
 Check '经典菜单 handler 实例化（comhost）' $classicActive 'comhost 类型映射过期？清 obj/bin 全量重发'
 
 # 菜单命令真实可执行（Invoke 走 Explorer 点击时的同款路径）。
@@ -266,7 +258,7 @@ if (Test-Path $probeExe) {
         if (Test-Path $tmp) { [System.IO.Directory]::Delete($tmp, $true) }
     }
 } else {
-    Say '  [--] 跳过 Invoke 实测（未编译 tests\7zipContext.ComProbe）' 'DarkGray'
+    Check '菜单命令可执行（Invoke 实测）' $false '缺少 ComProbe，请先编译测试工程或使用完整安装包'
 }
 
 $legacy = 0
@@ -279,7 +271,7 @@ Check '旧版重复动词已清零' ($legacy -eq 0) "残留 $legacy 个"
 
 Say ''
 if ($bad -eq 0) {
-    Say '安装完成，全部自检通过。' 'Green'
+    Say '全部自检通过，正在提交安装。' 'Green'
 } else {
     Say "安装完成，但有 $bad 项自检未过（见上方 [X]）。" 'Yellow'
 }
@@ -302,4 +294,28 @@ if ($RestartExplorer) {
     Say '  （菜单若未出现：注销重登，或加 -RestartExplorer 参数重跑）' 'DarkGray'
 }
 
-exit $(if ($bad -eq 0) { 0 } else { 1 })
+if ($bad -ne 0) { throw "安装自检失败（$bad 项）。" }
+if ($null -ne $pendingPublish) {
+    $cleanupWarning = $pendingPublish.Commit()
+    if ($cleanupWarning) { Write-Warning $cleanupWarning }
+    else {
+        try { Remove-DeploymentWorkspace (Split-Path -Parent $pendingPublish.Journal.Work) (Join-Path $root 'dist-stage') }
+        catch { Write-Warning ('安装已提交，准备目录保留：' + $_) }
+    }
+}
+exit 0
+} catch {
+    $failure = $_
+    if ($null -ne $pendingPublish -and $pendingPublish.Journal.State -ne 'committed') {
+        $rollbackExplorer = $false
+        try {
+            $rollbackExplorer = Stop-DeploymentProcesses -IncludeExplorer
+            $pendingPublish.Rollback()
+            Write-Warning '旧程序文件已恢复。系统注册可能仍需修复，本次安装未完成。'
+        } catch {
+            [Console]::Error.WriteLine("恢复未全部完成；备份保留在 $($pendingPublish.Journal.Work)：$_")
+        } finally { Restore-DeploymentExplorer $rollbackExplorer }
+    }
+    [Console]::Error.WriteLine("安装未完成：$failure")
+    exit 1
+} finally { Exit-DeploymentLease $deploymentContext }

@@ -1,104 +1,95 @@
-﻿# 7zipContext 发布脚本：分项目独立发布后合并到 dist\
-# 关键：三个项目绝不能共用 -o 输出目录——框架依赖发布会清理同目录里
-# 不属于自己的文件（曾把自包含运行时 180+ 个 dll 全删掉，7zipContext.exe 启动即挂）。
-# 产出：7zipContext.exe / Shell+Classic comhost / 项目文档（7-Zip 引擎不随包，安装阶段单独获取）
+﻿# Publish to isolated output first; dist stays at its registered AppX path.
+param([switch]$KeepRollback)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'deployment.ps1')
+$deploymentContext = Enter-DeploymentLease
+$stageParent = Join-Path $root 'dist-stage'
+$stage = Join-Path $stageParent ('publish-' + [Guid]::NewGuid().ToString('N'))
 $dist = Join-Path $root 'dist'
-$stage = Join-Path $root 'dist-stage'
-
-$dotnet = Join-Path $env:USERPROFILE '.dotnet\dotnet.exe'
-if (-not (Test-Path $dotnet)) { $dotnet = 'dotnet' }
-
-if (Test-Path $stage) { [System.IO.Directory]::Delete($stage, $true) }
-
-# 7zipContext.App 自包含（便携，开箱即用）；7zipContext.Shell / 7zipContext.Preview 框架依赖
-# （COM hosting 不支持自包含 NETSDK1128，comhost 从系统 .NET Desktop 运行时引导）
-$plans = @(
-    @{ Name = '7zipContext.App';     SelfContained = 'true' },
-    @{ Name = '7zipContext.Shell';   SelfContained = 'false' },
-    @{ Name = '7zipContext.Classic'; SelfContained = 'false' }
-)
-
-# 经典菜单 handler 由 explorer.exe 进程内加载（托管 CLR 在 explorer 里跑），
-# 现代菜单动词由系统 dllhost.exe 承载 —— 两者都会锁住 dist\*.dll。
-# 只停 explorer 不够：菜单刚被点过/刚跑完安装自检时 dllhost 仍常驻，
-# 直接删 dist 会报 UnauthorizedAccessException（实测踩过）。
-function Stop-DistLockers {
-    Get-Process -Name '7zipContext.Shell', '7zipContext' -ErrorAction SilentlyContinue | ForEach-Object {
-        try { $_.Kill() } catch { }
-    }
-    Get-Process -Name dllhost -ErrorAction SilentlyContinue | ForEach-Object {
-        try {
-            if ($_.Modules | Where-Object { $_.FileName -like '*7zipContext*' }) { $_.Kill() }
-        } catch { }
-    }
-    if (Get-Process -Name explorer -ErrorAction SilentlyContinue) {
-        Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-    }
-}
-
-$killedExplorer = (Get-Process -Name explorer -ErrorAction SilentlyContinue) -ne $null
+$transaction = $null
+$keepStage = $false
+$wasExplorer = $false
 try {
-Stop-DistLockers
-Start-Sleep -Milliseconds 1200
-
-foreach ($plan in $plans) {
-    Write-Host "  发布 $($plan.Name) ..." -ForegroundColor DarkGray
-    $out = Join-Path $stage $plan.Name
-    & $dotnet publish (Join-Path $root "src\$($plan.Name)\$($plan.Name).csproj") `
-        -c Release -r win-x64 --self-contained $plan.SelfContained -p:PublishSingleFile=false `
-        -o $out --nologo -v q
-    if ($LASTEXITCODE -ne 0) { throw "$($plan.Name) 发布失败" }
-}
-
-# 合并到 dist（App 优先铺底运行时，后两个只添 comhost 产物）
-# 删除可能仍被残留句柄占用，重试几次并在每次重试前再清一遍锁。
-$deleted = $false
-for ($attempt = 1; $attempt -le 3 -and -not $deleted; $attempt++) {
-    try {
-        if (Test-Path $dist) { [System.IO.Directory]::Delete($dist, $true) }
-        $deleted = $true
-    } catch {
-        if ($attempt -eq 3) {
-            throw "无法清空 dist\（comhost dll 被占用）。最常见原因：刚在同一个 PowerShell 进程里跑过 " +
-                  "install.ps1 自检 —— 它会实例化进程内的经典菜单 COM，DLL 会一直锁在宿主进程里，" +
-                  "杀 explorer/dllhost 没用。请**新开一个 PowerShell 窗口**再跑 publish.ps1 或 install.ps1。" +
-                  "`n原始错误：$($_.Exception.Message)"
+    # Recover interrupted switches before a new build. No registration changes here.
+    if (Test-Path -LiteralPath $stageParent) {
+        foreach ($oldStage in Get-ChildItem -LiteralPath $stageParent -Directory -Filter 'publish-*') {
+            try {
+            $oldWork = Join-Path $oldStage.FullName 'transaction'
+            if (Test-Path -LiteralPath (Join-Path $oldWork 'transaction.xml')) {
+                $old = [ZipContext.Deployment.FileDeployment]::Load($oldWork, $dist)
+                if ($old.Journal.State -ne 'committed' -and $old.Journal.State -ne 'rolledBack') {
+                    $oldExplorer = $false
+                    try {
+                        if ($old.Journal.State -ne 'prepared') { $oldExplorer = Stop-DeploymentProcesses -IncludeExplorer }
+                        $old.Rollback()
+                        Write-Host '已恢复上次未完成发布的文件。' -ForegroundColor Yellow
+                    } finally { Restore-DeploymentExplorer $oldExplorer }
+                }
+            }
+            Remove-DeploymentWorkspace $oldStage.FullName $stageParent
+            } catch { throw "无法恢复或清理上次部署：$($oldStage.FullName)，文件已保留。$_" }
         }
-        Stop-DistLockers
-        Start-Sleep -Milliseconds 900
     }
-}
-New-Item -ItemType Directory -Path $dist -Force | Out-Null
-foreach ($plan in $plans) {
-    Copy-Item (Join-Path $stage "$($plan.Name)\*") $dist -Recurse -Force
-}
-
-# 7-Zip 引擎不随包分发：安装阶段由 install.ps1 调 --ensure-engine 获取，
-# 落到 %LOCALAPPDATA%\7zipContext\engine\，与 dist\（AppX 包根）彻底解耦。
-# 因此这里不拷任何 7z*.exe / 7z.dll / Lang。
-
-# 项目自身文档随发布产物分发（MIT 许可 + 第三方组件来源说明）。
-foreach ($f in 'LICENSE', 'THIRD-PARTY-NOTICES.md') {
-    Copy-Item (Join-Path $root $f) (Join-Path $dist $f) -Force
-}
-
-# 产物核对
-$expect = @('7zipContext.exe', '7zipContext.Shell.comhost.dll',
-            '7zipContext.Classic.comhost.dll', 'LICENSE', 'THIRD-PARTY-NOTICES.md', 'coreclr.dll')
-$missing = $expect | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
-if ($missing.Count -gt 0) { throw "发布产物缺失：$($missing -join ', ')" }
-
-if (Test-Path $stage) { [System.IO.Directory]::Delete($stage, $true) }
-
-Write-Host "发布完成 → $dist（$($expect.Count)/$($expect.Count) 产物齐全，含自包含运行时）" -ForegroundColor Green
-}
-finally {
-    # 即使编译、清空 dist 或复制产物中途失败，也必须恢复桌面和任务栏。
-    if ($killedExplorer -and -not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
-        try { Start-Process explorer.exe }
-        catch { Write-Warning "资源管理器自动恢复失败，请手动运行 explorer.exe：$($_.Exception.Message)" }
+    $dotnet = Join-Path $env:USERPROFILE '.dotnet\dotnet.exe'
+    if (-not (Test-Path -LiteralPath $dotnet)) { $dotnet = 'dotnet' }
+    $plans = @(
+        @{ Name = '7zipContext.App'; SelfContained = 'true' },
+        @{ Name = '7zipContext.Shell'; SelfContained = 'false' },
+        @{ Name = '7zipContext.Classic'; SelfContained = 'false' }
+    )
+    foreach ($plan in $plans) {
+        Write-Host "发布 $($plan.Name) ..." -ForegroundColor DarkGray
+        & $dotnet publish (Join-Path $root "src\$($plan.Name)\$($plan.Name).csproj") `
+            -c Release -r win-x64 --self-contained $plan.SelfContained -p:PublishSingleFile=false `
+            -o (Join-Path $stage $plan.Name) --nologo -v q | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "$($plan.Name) 发布失败，当前程序文件尚未更改。" }
     }
+    $candidate = Join-Path $stage 'candidate'
+    foreach ($plan in $plans) {
+        [ZipContext.Deployment.FileDeployment]::CopyTree((Join-Path $stage $plan.Name), $candidate, $false)
+    }
+    foreach ($file in 'LICENSE', 'THIRD-PARTY-NOTICES.md') {
+        Copy-Item -LiteralPath (Join-Path $root $file) -Destination (Join-Path $candidate $file) -Force
+    }
+    $expected = @('7zipContext.exe', '7zipContext.Shell.comhost.dll', '7zipContext.Classic.comhost.dll',
+                  'LICENSE', 'THIRD-PARTY-NOTICES.md', 'coreclr.dll')
+    $missing = $expected | Where-Object { -not (Test-Path -LiteralPath (Join-Path $candidate $_)) }
+    if ($missing.Count) { throw "候选产物缺失：$($missing -join ', ')" }
+    # All compilation, merging, validation and backup finish before stopping shell hosts.
+    $transaction = [ZipContext.Deployment.FileDeployment]::Prepare($candidate, $dist,
+        (Join-Path $stage 'transaction'), [string[]]@('7zipContext.ini'), $true)
+    $wasExplorer = Stop-DeploymentProcesses -IncludeExplorer
+    $transaction.Apply()
+    if ($KeepRollback) {
+        $keepStage = $true
+        Write-Host '文件已切换，安装流程保留回滚备份。' -ForegroundColor DarkGray
+        return $transaction
+    }
+    $warning = $transaction.Commit()
+    if ($warning) { Write-Warning $warning; $keepStage = $true }
+    Write-Host "发布完成 → $dist（$($expected.Count)/$($expected.Count) 必需产物齐全）。" -ForegroundColor Green
+} catch {
+    $original = $_
+    if ($null -ne $transaction -and $transaction.Journal.State -ne 'committed') {
+        try {
+            if ($transaction.Journal.State -ne 'prepared' -and $transaction.Journal.State -ne 'rolledBack') {
+                $wasExplorer = (Stop-DeploymentProcesses -IncludeExplorer) -or $wasExplorer
+            }
+            $transaction.Rollback()
+            Write-Warning '发布失败，旧文件已恢复。'
+        } catch {
+            $keepStage = $true
+            throw "发布失败，恢复未全部完成。备份：$stage。原始错误：$original。恢复错误：$_"
+        }
+    }
+    throw $original
+} finally {
+    Restore-DeploymentExplorer $wasExplorer
+    if (-not $keepStage -and (Test-Path -LiteralPath $stage)) {
+        try { Remove-DeploymentWorkspace $stage $stageParent }
+        catch { Write-Warning "准备目录已保留：$stage；$_" }
+    }
+    Exit-DeploymentLease $deploymentContext
 }
