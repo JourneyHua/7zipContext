@@ -18,7 +18,8 @@ param(
     [switch]$RestartExplorer,
     [string]$EnginePath,
     [string]$EngineSource,
-    [switch]$SkipEngineCheck
+    [switch]$SkipEngineCheck,
+    [string]$PreparedEngineStatus
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,6 +32,18 @@ $exe = Join-Path $dist '7zipContext.exe'
 
 function Say([string]$msg, [string]$color = 'Gray') { Write-Host $msg -ForegroundColor $color }
 function Step([int]$n, [string]$msg) { Write-Host "[$n/5] $msg" -ForegroundColor Cyan }
+
+function Invoke-InstallProcess([string[]]$Arguments, [int]$TimeoutMilliseconds = 120000) {
+    $child = Start-Process -FilePath $exe -ArgumentList $Arguments -PassThru -WindowStyle Hidden
+    try {
+        if (-not $child.WaitForExit($TimeoutMilliseconds)) {
+            try { $child.Kill() } catch { }
+            throw '安装子任务超过等待时限，安装已停止；请保留日志后重试。'
+        }
+        return $child.ExitCode
+    } finally { $child.Dispose() }
+}
+
 
 . (Join-Path $PSScriptRoot 'deployment.ps1')
 $deploymentContext = Enter-DeploymentLease
@@ -55,24 +68,45 @@ if ($missing.Count -gt 0) {
 # 关键：这一步必须在 --install（注册 7zFM 可选打开方式）之前，
 # 且只在安装阶段联网；菜单/预览路径永远只读本地指针，绝不发网络请求。
 Step 2 '准备 7-Zip 引擎 ...'
-$engineArgs = @('--ensure-engine')
-if ($EnginePath)   { $engineArgs += @('--engine-path', ('"' + ($EnginePath -replace '(\\+)$', '$1$1') + '"')) }
-
-# Each request owns its result file; a second installer must not read the first one's result.
-$engineStatusPath = Join-Path ([System.IO.Path]::GetTempPath()) ('7zipContext-ensure-' + [Guid]::NewGuid().ToString('N') + '.json')
-$engineArgs += @('--status-path', ('"' + $engineStatusPath + '"'))
-$engineProc = Start-Process -FilePath $exe -ArgumentList $engineArgs -Wait -PassThru -WindowStyle Hidden
 $engineResult = $null
-if (Test-Path $engineStatusPath) {
-    try { $engineResult = Get-Content -LiteralPath $engineStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+$engineExitCode = 1
+if ($PreparedEngineStatus) {
+    if (-not $SkipPublish) { throw '已准备引擎状态只适用于跳过发布的安装流程。' }
+    $engineResult = Get-Content -LiteralPath $PreparedEngineStatus -Raw -Encoding UTF8 | ConvertFrom-Json
+    $pointer = Join-Path $env:LOCALAPPDATA '7zipContext\engine.path'
+    $preparedDirectory = if (Test-Path -LiteralPath $pointer) { [IO.File]::ReadAllText($pointer).Trim() } else { '' }
+    $preparedFiles = @('7z.exe', '7zG.exe', '7zFM.exe', '7z.dll')
+    if (-not $engineResult.ok -or -not $preparedDirectory -or
+        @($preparedFiles | Where-Object { -not [IO.File]::Exists((Join-Path $preparedDirectory $_)) }).Count) {
+        throw '已准备引擎状态无效或引擎文件缺失，安装已停止。'
+    }
+    $engineExitCode = if ($engineResult.warnings) { 4 } else { 0 }
+} else {
+    $engineArgs = @('--ensure-engine')
+    if ($EnginePath) { $engineArgs += @('--engine-path', ('"' + ($EnginePath -replace '(\\+)$', '$1$1') + '"')) }
+    $engineStatusPath = Join-Path ([IO.Path]::GetTempPath()) ('7zipContext-ensure-' + [Guid]::NewGuid().ToString('N') + '.json')
+    $engineArgs += @('--status-path', ('"' + $engineStatusPath + '"'))
+    $engineProc = Start-Process -FilePath $exe -ArgumentList $engineArgs -PassThru -WindowStyle Hidden
+    try {
+        if (-not $engineProc.WaitForExit(300000)) {
+            try { $engineProc.Kill() } catch { }
+            throw '准备引擎超时，安装已停止；请检查引擎和网络后重试。'
+        }
+        $engineExitCode = $engineProc.ExitCode
+        if (Test-Path -LiteralPath $engineStatusPath) {
+            $engineResult = Get-Content -LiteralPath $engineStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        }
+    } finally {
+        $engineProc.Dispose()
+        if (Test-Path -LiteralPath $engineStatusPath) { Remove-Item -LiteralPath $engineStatusPath -Force -ErrorAction SilentlyContinue }
+    }
 }
-if (Test-Path -LiteralPath $engineStatusPath) { Remove-Item -LiteralPath $engineStatusPath -Force -ErrorAction SilentlyContinue }
-$engineReady = ($engineProc.ExitCode -in @(0, 4)) -and ($engineResult -and $engineResult.ok)
+$engineReady = ($engineExitCode -in @(0, 4)) -and ($engineResult -and $engineResult.ok)
 if ($engineReady) {
-    if ($engineProc.ExitCode -eq 4) { Say "  [WARN] $($engineResult.message)" 'Yellow' }
+    if ($engineExitCode -eq 4) { Say "  [WARN] $($engineResult.message)" 'Yellow' }
     else { Say "  [OK] $($engineResult.message)" 'Green' }
 } else {
-    $why = if ($engineResult -and $engineResult.message) { $engineResult.message } else { "exit=$($engineProc.ExitCode)，未产生状态文件" }
+    $why = if ($engineResult -and $engineResult.message) { $engineResult.message } else { "exit=$($engineExitCode)，未产生状态文件" }
     Say "  [X] 7-Zip 引擎未就绪：$why" 'Yellow'
     Say '      菜单仍会注册，但压缩/解压不可用。可重跑：' 'Yellow'
     Say '        install.ps1 -EnginePath <本机 7-Zip 目录>' 'Yellow'
@@ -80,7 +114,7 @@ if ($engineReady) {
 
 # 更新检查：只提示不升级，内部按「每天最多一次」节流；失败/离线绝不影响安装结果。
 if (-not $SkipEngineCheck -and $engineReady) {
-    Start-Process -FilePath $exe -ArgumentList @('--check-engine-update') -Wait -WindowStyle Hidden | Out-Null
+    Invoke-InstallProcess @('--check-engine-update') 60000 | Out-Null
     $checkPath = Join-Path $env:LOCALAPPDATA '7zipContext\last-query.json'
     if (Test-Path $checkPath) {
         try {
@@ -137,9 +171,9 @@ Step 4 '清理 v1 残留注册（动词 / 预览窗格 / 文件关联）...'
 
 # 清理旧版残留并注册 7zFM 可选打开方式；保留现有默认程序，不注册预览窗格。
 # WinExe 进程 $LASTEXITCODE 为空（5.1 对 GUI 程序不写），必须 -PassThru 取退出码
-$proc = Start-Process -FilePath $exe -ArgumentList @('--install') -Wait -PassThru -WindowStyle Hidden
-if ($proc.ExitCode -ne 0) {
-    Say "  [X] 7zipContext.exe --install 返回失败（exit=$($proc.ExitCode)）。" 'Yellow'
+$registrationExitCode = Invoke-InstallProcess @('--install')
+if ($registrationExitCode -ne 0) {
+    Say "  [X] 7zipContext.exe --install 返回失败（exit=$($registrationExitCode)）。" 'Yellow'
     throw '菜单注册未完成；若另一个引擎操作正在进行，请等待结束后重试。'
 } else {
     Say '  [OK] v1 残留清理完成；已添加可选打开方式，保留现有默认程序' 'Green'

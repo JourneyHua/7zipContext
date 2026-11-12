@@ -115,6 +115,12 @@ namespace ZipContext.Deployment
         public static FileDeployment Prepare(string source, string target, string work,
             string[] preserveExisting, bool removeObsolete)
         {
+            return Prepare(source, target, work, preserveExisting, removeObsolete, null);
+        }
+
+        public static FileDeployment Prepare(string source, string target, string work,
+            string[] preserveExisting, bool removeObsolete, string[] removeExisting)
+        {
             source = Full(source); target = Full(target); work = Full(work);
             if (Same(source, Path.GetPathRoot(source)) || Same(target, Path.GetPathRoot(target)) || Same(work, Path.GetPathRoot(work)))
                 throw new IOException("事务目录不能为磁盘根目录。 ");
@@ -127,6 +133,11 @@ namespace ZipContext.Deployment
             var journal = new DeploymentJournal { Source = source, Target = target, Work = work };
             var names = new HashSet<string>(sources.Keys, StringComparer.OrdinalIgnoreCase);
             if (removeObsolete) names.UnionWith(originals.Keys);
+            foreach (var relative in removeExisting ?? new string[0])
+            {
+                Child(target, relative); // Validate before creating backups or changing files.
+                if (originals.ContainsKey(relative) && !sources.ContainsKey(relative)) names.Add(relative);
+            }
             var ordered = new List<string>(names); ordered.Sort(StringComparer.OrdinalIgnoreCase);
             Directory.CreateDirectory(work);
             foreach (var relative in ordered)

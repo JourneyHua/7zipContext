@@ -42,6 +42,7 @@ void Check(string name, bool ok)
 
 var work = Path.Combine(Path.GetTempPath(), "7zipContext-regression-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(work);
+RuntimeUpgradeChecks.Run(work, Check);
 var ini = AppSettings.IniPath; // 仅操作本测试输出目录里的配置。
 var original = File.Exists(ini) ? File.ReadAllBytes(ini) : null;
 var previewType = typeof(ZipContext.Classic.PreviewMenu).Assembly.GetType("ZipContext.Classic.PreviewSettings")!;

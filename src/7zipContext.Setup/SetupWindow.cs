@@ -207,7 +207,8 @@ public sealed class SetupWindow : Window
                 ValidatePayload();
                 CopyPayload(candidate);
                 return FileDeployment.Prepare(candidate, InstallRoot, Path.Combine(stage, "transaction"),
-                    new[] { Path.Combine("dist", "7zipContext.ini") }, false);
+                    new[] { Path.Combine("dist", "7zipContext.ini") }, false,
+                    ZipContext.Core.LegacyRuntimeFiles.Find(InstallRoot, candidate));
             });
             // 使用候选程序先准备引擎，网络等待不占用资源管理器停机时间。
             var ready = Path.Combine(stage, "engine-result.json");
@@ -228,7 +229,8 @@ public sealed class SetupWindow : Window
             await Task.Run(transaction.Apply);
             var script = Path.Combine(InstallRoot, "scripts", "install.ps1");
             registrationAttempted = true;
-            var exitCode = await RunScript(script, "-SkipPublish", "-SkipEngineCheck");
+            var exitCode = await RunScript(script, "-SkipPublish", "-SkipEngineCheck",
+                "-PreparedEngineStatus", "'" + ready.Replace("'", "''") + "'");
             if (exitCode != 0) throw new IOException($"安装自检未通过（退出码 {exitCode}）。");
             var warning = await Task.Run(transaction.Commit);
             if (warning is not null) AppendLog(warning);
@@ -404,7 +406,12 @@ public sealed class SetupWindow : Window
             if (!process.Start()) throw new InvalidOperationException("无法启动系统安装组件。");
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
-            process.WaitForExit();
+            if (!process.WaitForExit(180000))
+            {
+                try { process.Kill(entireProcessTree: true); process.WaitForExit(5000); } catch { }
+                throw new TimeoutException("系统安装步骤超过三分钟未完成，已停止并尝试恢复文件。请保留安装日志与备份。");
+            }
+            process.WaitForExit(); // Flush completed output callbacks.
             return process.ExitCode;
         });
     }
@@ -415,7 +422,13 @@ public sealed class SetupWindow : Window
         if (_deploymentToken is not null) start.Environment[DeploymentLease.EnvironmentName] = _deploymentToken;
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = await Task.Run(() => Process.Start(start) ?? throw new IOException("无法启动候选程序准备引擎。"));
-        await process.WaitForExitAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); } catch { }
+            throw new TimeoutException("准备引擎超过五分钟未完成，程序文件尚未切换，请稍后重试。");
+        }
         return process.ExitCode;
     }
 
