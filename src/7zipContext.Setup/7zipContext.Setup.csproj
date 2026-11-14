@@ -9,7 +9,7 @@
     <AssemblyName>7zipContext.Setup</AssemblyName>
     <StartupObject>ZipContext.Setup.Program</StartupObject>
     <ApplicationIcon>..\..\assets\7zipContext.ico</ApplicationIcon>
-    <Version>1.1.3</Version>
+    <Version>1.1.4</Version>
     <Product>7zipContext 安装卸载工具</Product>
   </PropertyGroup>
   <ItemGroup>
