@@ -28,6 +28,8 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
     private const int E_FAIL = unchecked((int)0x80004005);
     private const int E_INVALIDARG = unchecked((int)0x80070057);
     private const string PreviewTitle = "压缩文件预览";
+    // 超过这个数量就不再逐项做存在性检查（仍是文件系统路径，只是省掉同步 stat）。
+    private const int MaxStatPaths = 64;
 
     private readonly List<string> _paths = new();
     private readonly List<string?> _commands = new(); // ID 偏移 → CLI 动词；null 是不可执行的预览行
@@ -51,8 +53,15 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
             _commands.Clear();
             _extractTargets.Clear();
 
+            // 选中项来自 CF_HDROP，本身已是文件系统路径；存在性检查只是兜底。
+            // 网络共享/OneDrive 占位符上逐项 stat 可能很慢，所以只对前若干项做检查，
+            // 其余直接采用，避免在菜单线程上堆积同步 IO。
+            var checkedCount = 0;
             foreach (var p in ShellData.SelectedPaths(pDataObj))
-                if (File.Exists(p) || Directory.Exists(p)) _paths.Add(p);
+            {
+                if (checkedCount++ >= MaxStatPaths || File.Exists(p) || Directory.Exists(p))
+                    _paths.Add(p);
+            }
 
             // 解压目标统一走 Core：分卷入口和普通压缩包共同处理，后续卷不重复解压。
             _extractTargets.AddRange(ZipContext.Core.ArchiveSelection.TargetsForExtraction(_paths));
@@ -73,7 +82,7 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
         {
             _commands.Clear();
             // 本 handler 不改变默认动作，也不支持字符串规范动词调用。
-            if ((uFlags & (0x00000001u | 0x00000800u)) != 0) return 0;
+            if ((uFlags & (NativeMethods.CMF_DEFAULTONLY | NativeMethods.CMF_OPTIMIZEFORINVOKE)) != 0) return 0;
             if (_paths.Count == 0) return 0;
             var first = unchecked((uint)idCmdFirst);
             var last = unchecked((uint)idCmdLast);
@@ -190,8 +199,7 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
             // 解压动词只收首卷；压缩动词仍使用完整选择。
             var targets = IsExtractVerb(command) ? _extractTargets : _paths;
             if (targets.Count == 0) return E_FAIL;
-            Launch(command, targets);
-            return 0;
+            return Launch(command, targets) ? 0 : E_FAIL;
         }
         catch (Exception ex)
         {
@@ -239,8 +247,9 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
         _ => "（无法读取，可能已加密或损坏）",
     };
 
-    /// <summary>按红线 2：Assembly.Location 起算，绝不用 AppContext.BaseDirectory。</summary>
-    private static string ResolveAppExe()
+    /// <summary>按红线 2：Assembly.Location 起算，绝不用 AppContext.BaseDirectory。
+    /// 找不到就返回 null：回退裸文件名会让 UseShellExecute=false 按 cwd/PATH 解析，可能拉起别的程序。</summary>
+    private static string? ResolveAppExe()
     {
         var asm = Assembly.GetExecutingAssembly().Location;
         var dir = Path.GetDirectoryName(asm);
@@ -254,16 +263,21 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
                 if (File.Exists(p)) return p;
             }
         }
-        return "7zipContext.exe";
+        return null;
     }
 
     private static bool IsExtractVerb(string verb) => verb is
         "--smart-extract" or "--smart-extract-delete" or
         "--extract-to-name" or "--extract-to";
 
-    private static void Launch(string verb, IReadOnlyList<string> paths)
+    private static bool Launch(string verb, IReadOnlyList<string> paths)
     {
         var exe = ResolveAppExe();
+        if (exe is null)
+        {
+            Log($"未找到 7zipContext.exe，已放弃执行 {verb}（{paths.Count} 项）");
+            return false;
+        }
         Log($"拉起: {exe} {verb} ({paths.Count} 项)");
 
         var psi = new ProcessStartInfo
@@ -274,6 +288,7 @@ public sealed class PreviewMenu : IShellExtInit, IContextMenu
         psi.ArgumentList.Add(verb);
         foreach (var p in paths) psi.ArgumentList.Add(p);
         Process.Start(psi);
+        return true;
     }
 
     internal static void Log(string msg)
@@ -310,6 +325,7 @@ internal static class Icons
     private static int _sz;
     private static int _loaded;
     private static int _loading;
+    private static int _attempts;
 
     /// <summary>动词与标题统一用本程序图标。</summary>
     public static IntPtr App { get { RequestLoad(); return Volatile.Read(ref _loaded) == 1 ? _app : IntPtr.Zero; } }
@@ -375,8 +391,11 @@ internal static class Icons
         finally
         {
             if (comResult >= 0) CoUninitialize();
-            Volatile.Write(ref _loaded, 1);
-            PreviewMenu.Log($"icons: dir={(_dirPx is not null)} file={(_filePx is not null)} app=0x{_app:X} size={_sz}");
+            // 只有真正取到图标才标记完成；否则允许有限次重试，避免一次 COM/Shell 失败让该进程永久无图标。
+            var loaded = _dirPx is not null || _filePx is not null || _app != IntPtr.Zero;
+            if (loaded) Volatile.Write(ref _loaded, 1);
+            else if (Interlocked.Increment(ref _attempts) < 3) Volatile.Write(ref _loading, 0);
+            PreviewMenu.Log($"icons: dir={(_dirPx is not null)} file={(_filePx is not null)} app=0x{_app:X} size={_sz} loaded={loaded}");
         }
     }
 

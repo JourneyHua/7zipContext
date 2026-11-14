@@ -9,21 +9,27 @@ namespace ZipContext.Core;
 /// </summary>
 public sealed class ArchiveRules
 {
-    public HashSet<string> SplitFirstSuffixes { get; private set; }
+    public HashSet<string> SplitFirstSuffixes { get; private set; } = new(StringComparer.OrdinalIgnoreCase);
 
-    public HashSet<string> SplitLaterSuffixes { get; private set; }
+    public HashSet<string> SplitLaterSuffixes { get; private set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public bool OpenWithSevenZip { get; private set; } = true;
 
+    // 保留配置里的原始顺序：HashSet 的枚举顺序不保证，直接序列化会让每次保存都产生无意义差异。
+    private string[] _firstOrder = Array.Empty<string>();
+    private string[] _laterOrder = Array.Empty<string>();
+
     public ArchiveRules()
     {
-        SplitFirstSuffixes = new HashSet<string>(SettingsDocument.ParseSuffixList(DefaultSplitFirstSuffixes), StringComparer.OrdinalIgnoreCase);
-        SplitLaterSuffixes = new HashSet<string>(SettingsDocument.ParseSuffixList(DefaultSplitLaterSuffixes), StringComparer.OrdinalIgnoreCase);
+        SetSuffixes(SettingsDocument.ParseSuffixList(DefaultSplitFirstSuffixes),
+            SettingsDocument.ParseSuffixList(DefaultSplitLaterSuffixes));
     }
 
     private static ArchiveRules _cached = new();
     private static DateTime _cachedStamp = DateTime.MinValue;
     private static string? _path;
+    // explorer.exe 内会并发首次读取：不能出现「新时间戳 + 旧对象」的半更新状态。
+    private static readonly object CacheLock = new();
 
     public static ArchiveRules Current
     {
@@ -34,20 +40,26 @@ public sealed class ArchiveRules
                 var p = IniPath;
                 if (p is null || !File.Exists(p))
                 {
-                    _cachedStamp = DateTime.MinValue;
-                    return _cached = new ArchiveRules();
+                    lock (CacheLock)
+                    {
+                        _cachedStamp = DateTime.MinValue;
+                        return _cached = new ArchiveRules();
+                    }
                 }
 
                 var stamp = File.GetLastWriteTimeUtc(p);
-                if (stamp == _cachedStamp) return _cached;
+                lock (CacheLock)
+                {
+                    if (stamp == _cachedStamp) return _cached;
 
-                _cached = Parse(p);
-                _cachedStamp = stamp;
-                return _cached;
+                    _cached = Parse(p);
+                    _cachedStamp = stamp;
+                    return _cached;
+                }
             }
             catch
             {
-                return _cached; // 读配置失败用上一份/默认值，绝不让菜单挂掉
+                return Volatile.Read(ref _cached); // 读配置失败用上一份/默认值，绝不让菜单挂掉
             }
         }
     }
@@ -71,16 +83,25 @@ public sealed class ArchiveRules
     private static ArchiveRules Parse(string path)
     {
         var settings = SettingsDocument.Load(path);
-        return new ArchiveRules
-        {
-            SplitFirstSuffixes = new HashSet<string>(SettingsDocument.ParseSuffixList(settings.SplitFirstSuffixes), StringComparer.OrdinalIgnoreCase),
-            SplitLaterSuffixes = new HashSet<string>(SettingsDocument.ParseSuffixList(settings.SplitLaterSuffixes), StringComparer.OrdinalIgnoreCase),
-            OpenWithSevenZip = settings.OpenWithSevenZip,
-        };
+        var rules = new ArchiveRules();
+        rules.SetSuffixes(SettingsDocument.ParseSuffixList(settings.SplitFirstSuffixes),
+            SettingsDocument.ParseSuffixList(settings.SplitLaterSuffixes));
+        rules.OpenWithSevenZip = settings.OpenWithSevenZip;
+        return rules;
     }
-    /// <summary>把配置序列化回 ini 值形式，供设置面板显示/保存。</summary>
-    public string SplitFirstValue => string.Join(",", SplitFirstSuffixes);
-    public string SplitLaterValue => string.Join(",", SplitLaterSuffixes);
+
+    /// <summary>统一入口：建索引用大小写不敏感集合，序列化用原始顺序。</summary>
+    private void SetSuffixes(IEnumerable<string> first, IEnumerable<string> later)
+    {
+        _firstOrder = first.ToArray();
+        _laterOrder = later.ToArray();
+        SplitFirstSuffixes = new HashSet<string>(_firstOrder, StringComparer.OrdinalIgnoreCase);
+        SplitLaterSuffixes = new HashSet<string>(_laterOrder, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>把配置序列化回 ini 值形式，供设置面板显示/保存。按配置原始顺序输出。</summary>
+    public string SplitFirstValue => string.Join(",", _firstOrder);
+    public string SplitLaterValue => string.Join(",", _laterOrder);
 }
 
 /// <summary>分卷后缀匹配与同组文件查找。</summary>

@@ -17,6 +17,13 @@ internal static class CliChecks
             Console.Error.WriteLine("password required");
             return 2;
         }
+        // 输出里出现 "password" 但其实是别的错误：不能据此索要密码。
+        if (name.Contains("wordlist"))
+        {
+            Console.WriteLine("----------\nPath = password.txt\nSize = 1\n");
+            Console.Error.WriteLine("fixture outcome 2");
+            return 2;
+        }
         var code = name.Contains("fail") ? 2 : name.Contains("warning") ? 1 :
             name.Contains("cancel") ? 255 : name.Contains("invalid") ? 7 : 0;
         if (args[0] == "l" && name.Contains("write")) code = 0;
@@ -102,6 +109,10 @@ internal static class CliChecks
         check("CLI engine syntax error returns invalid", Run("--test", invalid) == 2);
         check("CLI password required without interaction fails promptly", Run("--test", encrypted) == 1 && prompts == 0);
         check("CLI cancelled password prompt returns cancelled", Runner().Run(new[] { "--test", encrypted }) == 3 && prompts == 1);
+        // 输出里出现 "password" 字样但不是密码问题（例如包内条目名含该词）：不得弹密码框。
+        var wordlist = Input("wordlist.zip");
+        var promptsBefore = prompts;
+        check("CLI incidental password word does not prompt", Runner().Run(new[] { "--test", wordlist }) == 1 && prompts == promptsBefore);
         check("CLI password retry can succeed", Runner(_ => "secret").Run(new[] { "--test", encrypted }) == 0);
         check("CLI cancelled folder prompt returns cancelled", Runner().Run(new[] { "--extract-to", good }) == 3);
         check("CLI named extraction failure propagates", Run("--extract-to-name", bad) == 1);

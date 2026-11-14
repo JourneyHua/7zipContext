@@ -41,6 +41,9 @@ public sealed class SevenZipService
         public bool Success => ExitCode == 0;
     }
 
+    /// <summary>删除前复核等内部列表调用的单管道输出上限，与预览预算同值（4Mi 字符）。</summary>
+    public const int PreviewOutputChars = 4 * 1024 * 1024;
+
     /// <summary>异步运行 7z。password 为 null 时不传 -p（交互式会挂起，所以无密码也传 -p 空串由调用方决定）。</summary>
     private async Task<RunResult> RunAsync(IEnumerable<string> args, string? password,
         CancellationToken ct = default, string? workingDirectory = null, int maxOutputChars = int.MaxValue)
@@ -48,7 +51,8 @@ public sealed class SevenZipService
         var allArgs = new List<string>(args);
         // 只在真有密码时传 -p。裸 -p 会让 7z 交互式提示并挂起；
         // 不传 -p 时若包已加密，stdin 已关死 → 7z 快速报错 → 被 LooksLikePasswordProblem 接住。
-        if (password is not null)
+        // 空串必须归一为 null：否则会拼出裸 -p，与「没有密码」的语义冲突。
+        if (!string.IsNullOrEmpty(password))
             allArgs.Add($"-p{password}");
         allArgs.Add("-y"); // 全部确认
         allArgs.Add("-bso0"); // 抑制标准输出里的进度（保留列表输出）
@@ -121,7 +125,7 @@ public sealed class SevenZipService
         CancellationToken ct, string? workingDirectory)
     {
         var allArgs = new List<string>(args);
-        if (password is not null) allArgs.Add($"-p{password}");
+        if (!string.IsNullOrEmpty(password)) allArgs.Add($"-p{password}");
         allArgs.Add("-y");
 
         var psi = new ProcessStartInfo
@@ -177,8 +181,9 @@ public sealed class SevenZipService
         return ParseListing(res.StdOut, maxEntries, ct);
     }
 
-    /// <summary>识别「缺密码/密码错」类失败。只认 password 措辞与加密头打不开，
-    /// 不能匹配裸 "encrypted" —— 列表输出本身就有 Encrypted = - 字段。</summary>
+    /// <summary>识别「缺密码/密码错」类失败。只认明确的密码措辞或加密头打不开，
+    /// 不能匹配裸 "password" —— 路径或条目名里出现该词时会把磁盘满、文件占用等真错误
+    /// 误报成需要密码，进而在菜单/CLI 上反复弹密码框。</summary>
     private static bool LooksLikePasswordProblem(RunResult res)
     {
         var text = res.StdOut + "\n" + res.StdErr;
@@ -186,8 +191,12 @@ public sealed class SevenZipService
             return text.Contains("Enter password", StringComparison.OrdinalIgnoreCase)
                 && !text.Contains("cancelled", StringComparison.OrdinalIgnoreCase)
                 && !text.Contains("canceled", StringComparison.OrdinalIgnoreCase);
-        return text.Contains("password", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("Can not open encrypted archive", StringComparison.OrdinalIgnoreCase);
+        return text.Contains("Wrong password", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Can not open encrypted archive", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Cannot open encrypted archive", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Enter password", StringComparison.OrdinalIgnoreCase)
+            // 测试夹具用语；与真实 7-Zip 的 "Enter password" 保持同一语义。
+            || text.Contains("password required", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string FirstErrorLine(RunResult res)
@@ -252,7 +261,9 @@ public sealed class SevenZipService
     public async Task<int?> ReadVolumeCountAsync(string archivePath, string? password = null,
         CancellationToken ct = default)
     {
-        var result = await RunAsync(new[] { "l", "-slt", "-sccUTF-8", archivePath }, password, ct);
+        // 与 ListAsync 同样的输出限额：删除前的这次全量列表不能无界驻留内存。
+        var result = await RunAsync(new[] { "l", "-slt", "-sccUTF-8", archivePath }, password, ct,
+            maxOutputChars: PreviewOutputChars);
         if (!result.Success) return null;
         var counts = new HashSet<int>();
         foreach (var raw in result.StdOut.Split('\n'))
@@ -277,8 +288,11 @@ public sealed class SevenZipService
         if (onlyPaths is { Count: > 0 })
         {
             var listFile = Path.GetTempFileName();
-            await File.WriteAllLinesAsync(listFile, onlyPaths, ct);
+            // 列表文件显式写 BOM 并声明 -scsUTF-8：不同引擎版本对「无 BOM 列表文件」的默认编码
+            // 解释不一致，明确声明后非 ASCII 条目名不依赖系统代码页。
+            await File.WriteAllLinesAsync(listFile, onlyPaths, new UTF8Encoding(true), ct);
             args.Add($"@{listFile}");
+            args.Add("-scsUTF-8");
             try { return await RunWriteAsync(args, password, ct); }
             finally { File.Delete(listFile); }
         }

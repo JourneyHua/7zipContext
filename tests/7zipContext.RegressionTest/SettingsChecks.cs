@@ -37,6 +37,14 @@ internal static class SettingsChecks
         check("settings invalid numeric values use defaults",s.RootMax==20 && s.MaxDepth==1);
         check("settings blank differs from missing suffix key",s.SplitFirstSuffixes=="" && SettingsDocument.Load(fresh).SplitFirstSuffixes.Length>0);
         check("settings suffix normalization shared",SettingsDocument.ParseSuffixList("001;.z01,.001").SequenceEqual(new[]{".001",".z01"}));
+        var orderPath = Path.Combine(root, "order.ini");
+        File.WriteAllText(orderPath, "[archive]\nsplitFirstSuffixes=.z01,.001\nsplitLaterSuffixes=.z02,.002\n");
+        var parsed = (ArchiveRules)typeof(ArchiveRules)
+            .GetMethod("Parse", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .Invoke(null, new object[] { orderPath })!;
+        check("archive suffix order preserved for serialization",
+            parsed.SplitFirstValue == ".z01,.001" && parsed.SplitLaterValue == ".z02,.002" &&
+            parsed.SplitFirstSuffixes.Count == 2);
         var ini=AppSettings.IniPath;
         var backup=File.Exists(ini)?File.ReadAllBytes(ini):null;
         try

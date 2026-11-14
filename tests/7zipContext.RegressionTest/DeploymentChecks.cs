@@ -176,6 +176,16 @@ internal static class DeploymentChecks
         transaction.Apply(); transaction.Rollback();
         check("fresh-install rollback leaves no program files", Directory.Exists(freshTarget) && Directory.GetFiles(freshTarget).Length == 0);
         transaction.Cleanup();
+
+        // 事务日志自身必须能在「不支持 ReplaceFile 的卷」上保存：不能出现残留的改名文件。
+        var journal = Fixture("journal-replace");
+        transaction = Prepare(journal);
+        transaction.Apply();   // 内部会多次改写 transaction.xml
+        transaction.Rollback();
+        var journalDir = Path.GetDirectoryName(transaction.JournalPath)!;
+        check("journal rewrite leaves no stray files", Directory.GetFiles(journalDir, "transaction.xml*").Length == 1 &&
+            File.Exists(transaction.JournalPath) && FileDeployment.Load(journal.Work, journal.Target).Journal.State == "rolledBack");
+        transaction.Cleanup();
     }
 
     private static void Save(FileDeployment transaction)

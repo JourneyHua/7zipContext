@@ -16,7 +16,8 @@ public sealed class TreeNode
 {
     public required string Name { get; init; }
     public string FullPath { get; init; } = "";
-    public bool IsFolder { get; init; }
+    // 同一路径既是文件又被用作目录（包内有 a 和 a/b）时需要把节点升级为目录。
+    public bool IsFolder { get; set; }
     public long Size { get; set; }
     public long PackedSize { get; set; }
     public bool Encrypted { get; set; }
@@ -45,14 +46,20 @@ public sealed class TreeNode
         for (int i = 0; i < parts.Length; i++)
         {
             bool last = i == parts.Length - 1;
-            var child = cur.Find(parts[i], !last || entry.IsFolder);
+            var wantedFolder = !last || entry.IsFolder;
+            var child = cur.Find(parts[i], wantedFolder);
+            if (child is null && !last)
+            {
+                // 包内同时有文件 a 和 a/b 时，中间层不能另建同名节点，否则预览出现两行 "a"。
+                child = cur.PromoteToFolder(cur.Find(parts[i], folder: false));
+            }
             if (child is null)
             {
                 child = new TreeNode
                 {
                     Name = parts[i],
                     FullPath = string.Join('/', parts.Take(i + 1)),
-                    IsFolder = !last || entry.IsFolder,
+                    IsFolder = wantedFolder,
                 };
                 cur._children.Add(child);
                 cur._index.Add((child.Name, child.IsFolder), child);
@@ -65,6 +72,19 @@ public sealed class TreeNode
             }
             cur = child;
         }
+    }
+
+    /// <summary>把同名文件节点升级为目录，并同步索引键。</summary>
+    private TreeNode? PromoteToFolder(TreeNode? existing)
+    {
+        if (existing is null) return null;
+        if (!existing.IsFolder)
+        {
+            _index.Remove((existing.Name, false));
+            existing.IsFolder = true;
+            _index[(existing.Name, true)] = existing;
+        }
+        return existing;
     }
 
     /// <summary>按「文件夹在前、名称排序」整理整棵树。</summary>

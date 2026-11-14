@@ -18,6 +18,11 @@ internal static class DiagnosticsChecks
         check("tree duplicate updates metadata",tree.Children[0].Children.Single(n=>n.Name=="item100").Size==42);
         tree.Insert(Entry("same",directory:true)); tree.Insert(Entry("same"));
         check("tree keeps same-name file and directory distinct",tree.Children.Count(n=>n.Name=="same")==2);
+        var promoted=new TreeNode{Name="p",IsFolder=true};
+        promoted.Insert(Entry("node"));
+        promoted.Insert(Entry("node/child.txt"));
+        check("tree promotes same-name file node to folder",promoted.Children.Count(n=>n.Name=="node")==1 && promoted.Children[0].IsFolder &&
+            promoted.Children[0].Children.Count==1);
         tree.Insert(Entry("Case")); tree.Insert(Entry("case"));
         check("tree preserves case-sensitive names",tree.Children.Count(n=>n.Name is "Case" or "case")==2);
         var list=tree.Children;
@@ -59,10 +64,21 @@ internal static class DiagnosticsChecks
             check("owned native buffer is usable",Marshal.ReadInt32(memory)==123);
             scope.FreeHGlobal(memory); scope.FreeHGlobal(memory);
         }
-        var count=GetGuiResources(Process.GetCurrentProcess().Handle,1);
-        var created=0;
-        for(int i=0;i<100;i++) { using var scope=new NativeResources(); if(scope.Menu(CreatePopupMenu())!=IntPtr.Zero) created++; }
-        check("owned undisplayed menus do not accumulate handles",created==100 && GetGuiResources(Process.GetCurrentProcess().Handle,1)<=count+2);
+        // 受限宿主（沙箱/低权限策略）可能不允许打开自身进程句柄查询 GDI/USER 计数。
+        // 此时只跳过句柄计数那一项，不把「没测到」记成通过，也不影响后续检查。
+        IntPtr? processHandle = null;
+        try { processHandle = Process.GetCurrentProcess().Handle; }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        {
+            Console.WriteLine($"SKIP GDI/USER handle accounting: host denied process handle ({ex.Message})");
+        }
+        if (processHandle is { } handle)
+        {
+            var count=GetGuiResources(handle,1);
+            var created=0;
+            for(int i=0;i<100;i++) { using var scope=new NativeResources(); if(scope.Menu(CreatePopupMenu())!=IntPtr.Zero) created++; }
+            check("owned undisplayed menus do not accumulate handles",created==100 && GetGuiResources(handle,1)<=count+2);
+        }
         using var started=new ManualResetEventSlim();
         var finished=0;
         var timer=new DrainingTimer(_=>{started.Set(); Thread.Sleep(10); Interlocked.Increment(ref finished);},null,0,Timeout.Infinite);

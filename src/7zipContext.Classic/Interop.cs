@@ -49,6 +49,10 @@ public static class NativeMethods
     // MENUITEMINFO
     public const uint MIIM_BITMAP = 0x00000080;
 
+    // QueryContextMenu 的 uFlags（CMF_*）
+    public const uint CMF_DEFAULTONLY = 0x00000001;
+    public const uint CMF_OPTIMIZEFORINVOKE = 0x00000800;
+
     // SHGetFileInfo
     public const uint SHGFI_ICON = 0x00000100;
     public const uint SHGFI_SMALLICON = 0x00000001;

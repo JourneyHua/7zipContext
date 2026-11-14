@@ -63,8 +63,22 @@ public sealed class SmartExtractService
         CancellationToken ct = default)
     {
         var rules = ArchiveRules.Current;
-        var deletion = deleteAfter ? SplitVolumeNames.PlanDeletion(archivePath,
-            rules.SplitFirstSuffixes, rules.SplitLaterSuffixes) : null;
+        // 路径非法等非 IO 异常也会从 PlanDeletion 抛出；删除计划失败只表示「不能删」，不能中断解压。
+        SplitVolumeNames.DeletionPlan? deletion = null;
+        if (deleteAfter)
+        {
+            try { deletion = SplitVolumeNames.PlanDeletion(archivePath, rules.SplitFirstSuffixes, rules.SplitLaterSuffixes); }
+            catch (Exception ex)
+            {
+                // 兜底路径不能再用可能抛错的重载去拼目录名：这条路本身就是异常路径。
+                string dir;
+                try { dir = Path.GetDirectoryName(Path.GetFullPath(archivePath)) ?? "."; }
+                catch { dir = "."; }
+                return new SmartExtractResult(
+                    new SmartExtractPlan(dir, null, false),
+                    false, $"无法确定分卷删除范围，已取消本次操作：{ex.Message}", false, 2);
+            }
+        }
         SmartExtractPlan plan;
         try
         {

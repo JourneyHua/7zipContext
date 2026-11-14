@@ -299,12 +299,51 @@ namespace ZipContext.Deployment
                     {
                         if (File.Exists(JournalPath)) File.Replace(temporary, JournalPath, null);
                         else File.Move(temporary, JournalPath);
-                        break;
+                        return;
                     }
-                    catch (IOException) { if (attempt == 4) throw; Thread.Sleep(20); }
+                    catch (IOException)
+                    {
+                        // 先按共享冲突重试；重试耗尽后可能是「本卷不支持 ReplaceFile」，
+                        // 改用改名让位。若真是锁冲突，改名同样会失败并把原始错误抛出。
+                        if (attempt == 4) { ReplaceWithoutReplaceFile(temporary); return; }
+                        Thread.Sleep(20);
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                        // 部分卷（exFAT、网络共享、受策略限制的宿主）不支持 ReplaceFile；退回到改名让位。
+                        ReplaceWithoutReplaceFile(temporary);
+                        return;
+                    }
                 }
             }
             finally { try { if (File.Exists(temporary)) File.Delete(temporary); } catch { } }
+        }
+
+        /// <summary>
+        /// ReplaceFile 不可用时的替代：旧日志原子改名让位，新日志原子就位，最后删除让位文件。
+        /// 任何时刻都能读到一个完整日志；新日志就位失败时把旧日志改回原名再抛错。
+        /// 上一次恰好停在让位窗口时，先把让位文件复位，避免恢复日志丢失。
+        /// </summary>
+        private void ReplaceWithoutReplaceFile(string temporary)
+        {
+            var aside = JournalPath + ".previous";
+            if (!File.Exists(JournalPath) && File.Exists(aside)) File.Move(aside, JournalPath);
+            try { if (File.Exists(aside)) File.Delete(aside); } catch { }
+            var hadJournal = File.Exists(JournalPath);
+            if (hadJournal) File.Move(JournalPath, aside);
+            try
+            {
+                File.Move(temporary, JournalPath);
+            }
+            catch
+            {
+                if (hadJournal && !File.Exists(JournalPath))
+                {
+                    try { File.Move(aside, JournalPath); } catch { }
+                }
+                throw;
+            }
+            if (hadJournal) { try { File.Delete(aside); } catch { } }
         }
         private static bool EqualFiles(string first, string second)
         {

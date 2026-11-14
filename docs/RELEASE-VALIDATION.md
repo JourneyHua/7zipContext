@@ -16,6 +16,8 @@ python scripts/gen_icon.py --check
 
 Python 图标测试依赖见 scripts/requirements-icons.txt。无界面测试覆盖隔离文件操作、CLI 和未显示的菜单对象；不代表 Explorer 中的菜单或安装卸载已通过。
 
+宿主若禁止并行 MSBuild 节点通信（受限沙箱、命名管道被禁用等），`dotnet build` 会在 0 error 的情况下以 FAILED 退出；改用 `-m:1`（可再加 `-p:NuGetAudit=false` 跳过联网漏洞查询）即可复现正常构建。这只是构建环境限制，不改变项目默认设置。
+
 ## 系统集成检查
 
 在可回退的 Windows 11 测试环境验证：
@@ -38,6 +40,7 @@ Python 图标测试依赖见 scripts/requirements-icons.txt。无界面测试覆
 ## 已知限制
 
 - 自动化测试不能代替真实 COM、GUI、全新离线安装和卸载验证；目前这些场景的完整验证结果尚未提供。
+- 在 7zG 进度窗里点「取消」时的退出码尚未在真实 GUI 环境验证；若引擎返回 0，「智能解压并删除」会按成功处理，需在系统集成验证中专门确认。
 - 官方引擎下载仍全量读入内存，尚无下载大小上限。
 - 主程序、安装器和菜单组件依赖 .NET 8 Desktop Runtime x64；无运行时的离线环境无法直接完成安装。
 

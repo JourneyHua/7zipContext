@@ -28,26 +28,35 @@ public class ExplorerCommandBase : ComInterop.IExplorerCommand
 
     public int GetTitle(ComInterop.IShellItemArray? psiItemArray, out IntPtr ppszName)
     {
-        var title = Title;
-        if (title.Contains("{name}", StringComparison.Ordinal))
+        // 异常绝不能越过 COM 边界：标题失败只退回中性文字，不能让 dllhost 终止。
+        try
         {
-            var paths = ComInterop.GetPaths(psiItemArray);
-            // 解压类菜单文字用“实际解压目标”命名：分卷多选时取 .001，而不是父目录或 .002。
-            var displayPaths = IsExtractVerb(Verb)
-                ? ZipContext.Core.ArchiveSelection.TargetsForExtraction(paths)
-                : paths;
-            if (displayPaths.Count > 0)
+            var title = Title;
+            if (title.Contains("{name}", StringComparison.Ordinal))
             {
-                // 与 7zipContext.App 压缩输出共用命名规则：单选同名 / 多选父文件夹名
-                title = title.Replace("{name}", ZipContext.Core.NamingHelper.TargetBaseName(displayPaths));
+                var paths = ComInterop.GetPaths(psiItemArray);
+                // 解压类菜单文字用“实际解压目标”命名：分卷多选时取 .001，而不是父目录或 .002。
+                var displayPaths = IsExtractVerb(Verb)
+                    ? ZipContext.Core.ArchiveSelection.TargetsForExtraction(paths)
+                    : paths;
+                if (displayPaths.Count > 0)
+                {
+                    // 与 7zipContext.App 压缩输出共用命名规则：单选同名 / 多选父文件夹名
+                    title = title.Replace("{name}", ZipContext.Core.NamingHelper.TargetBaseName(displayPaths));
+                }
+                else
+                {
+                    // 快速构建阶段还没有选中项 → 用中性文案占位
+                    title = title.Replace("{name}", "同名");
+                }
             }
-            else
-            {
-                // 快速构建阶段还没有选中项 → 用中性文案占位
-                title = title.Replace("{name}", "同名");
-            }
+            ppszName = Marshal.StringToCoTaskMemUni(title);
         }
-        ppszName = Marshal.StringToCoTaskMemUni(title);
+        catch (Exception ex)
+        {
+            Fail("GetTitle 失败", ex);
+            ppszName = Marshal.StringToCoTaskMemUni("7zipContext");
+        }
         return ComInterop.S_OK;
     }
 
@@ -57,11 +66,20 @@ public class ExplorerCommandBase : ComInterop.IExplorerCommand
         // （曾导致菜单项整体消失 / 显示默认丑图标）。
         // 注意：dllhost 代理宿主里 AppContext.BaseDirectory 为空，
         // 用相对路径会得到 "7zipContext.Shell.exe,0" 这种指不到文件的字符串 → 图标丢失。
-        var dir = AssemblyDir();
-        var icon = Icon ?? (string.IsNullOrEmpty(dir)
-            ? "7zipContext.exe,0"
-            : Path.Combine(dir, "7zipContext.exe") + ",0");
-        ppszIcon = Marshal.StringToCoTaskMemUni(icon);
+        try
+        {
+            var dir = AssemblyDir();
+            var icon = Icon ?? (string.IsNullOrEmpty(dir)
+                ? "7zipContext.exe,0"
+                : Path.Combine(dir, "7zipContext.exe") + ",0");
+            ppszIcon = Marshal.StringToCoTaskMemUni(icon);
+        }
+        catch (Exception ex)
+        {
+            // 兜底文案不能让异常越过 COM 边界。
+            Fail("GetIcon 失败", ex);
+            ppszIcon = Marshal.StringToCoTaskMemUni("7zipContext.exe,0");
+        }
         return ComInterop.S_OK;
     }
 
@@ -91,31 +109,45 @@ public class ExplorerCommandBase : ComInterop.IExplorerCommand
         // Win11 新版右键菜单构建初期会以「空选中项」快速查询一次。
         // 根因修复：此时必须乐观返回 ECS_ENABLED —— 返回 ECS_HIDDEN 会被永久丢弃，
         // 这正是新版菜单完全不显示 7zipContext 的原因（「显示更多 options」走的是完整查询所以能看到）。
-        var paths = ComInterop.GetPaths(psiItemArray);
-        if (paths.Count == 0)
+        try
         {
-            // Win11 新版右键菜单构建初期会以「空选中项」快速查询一次。
-            // 根因修复：此时普通动词必须乐观返回 ECS_ENABLED —— 返回 ECS_HIDDEN 会被永久丢弃，
-            // 这正是新版菜单完全不显示 7zipContext 的原因（「显示更多 options」走的是完整查询所以能看到）。
-            // 但被 ini 全局关闭的动词（如「用 7-Zip 打开」）在空查询时就该隐藏。
-            pCmdState = VisibleWhenEmpty ? ComInterop.ECS_ENABLED : ComInterop.ECS_HIDDEN;
-            return ComInterop.S_OK;
+            var paths = ComInterop.GetPaths(psiItemArray);
+            if (paths.Count == 0)
+            {
+                // 但被 ini 全局关闭的动词（如「用 7-Zip 打开」）在空查询时就该隐藏。
+                pCmdState = VisibleWhenEmpty ? ComInterop.ECS_ENABLED : ComInterop.ECS_HIDDEN;
+                return ComInterop.S_OK;
+            }
+            // 有真实选中项时按规则显隐（压缩包→解压项；任意文件/文件夹→压缩项）
+            pCmdState = IsVisible(paths) ? ComInterop.ECS_ENABLED : ComInterop.ECS_HIDDEN;
         }
-        // 有真实选中项时按规则显隐（压缩包→解压项；任意文件/文件夹→压缩项）
-        pCmdState = IsVisible(paths) ? ComInterop.ECS_ENABLED : ComInterop.ECS_HIDDEN;
+        catch (Exception ex)
+        {
+            // 判定失败时保持可见：宁可多显示一项，也不要因异常让菜单项消失或让 dllhost 崩掉。
+            Fail("GetState 失败", ex);
+            pCmdState = ComInterop.ECS_ENABLED;
+        }
         return ComInterop.S_OK;
     }
 
     public int Invoke(ComInterop.IShellItemArray? psiItemArray, IntPtr pbc)
     {
-        var paths = ComInterop.GetPaths(psiItemArray);
-        if (paths.Count == 0) return ComInterop.E_FAIL;
+        IReadOnlyList<string> targets;
+        try
+        {
+            var paths = ComInterop.GetPaths(psiItemArray);
+            if (paths.Count == 0) return ComInterop.E_FAIL;
 
-        // 解压动词传分卷入口及普通压缩包，统一去重；压缩动词仍传完整选择。
-        var targets = IsExtractVerb(Verb)
-            ? ZipContext.Core.ArchiveSelection.TargetsForExtraction(paths)
-            : paths;
-        if (targets.Count == 0) return ComInterop.E_FAIL;
+            // 解压动词传分卷入口及普通压缩包，统一去重；压缩动词仍传完整选择。
+            targets = IsExtractVerb(Verb)
+                ? ZipContext.Core.ArchiveSelection.TargetsForExtraction(paths)
+                : paths;
+            if (targets.Count == 0) return ComInterop.E_FAIL;
+        }
+        catch (Exception ex)
+        {
+            return Fail("读取选中项失败", ex);
+        }
 
         // 长操作全部交给 7zipContext.exe（独立进程，崩溃绝不拖垮 Explorer）
         // 注意：命令行必须用 ArgumentList（UseShellExecute=false）——
